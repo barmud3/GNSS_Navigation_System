@@ -5,108 +5,118 @@ import numpy as np
 import navpy
 from gnssutils import EphemerisManager
 import simplekml
-import asyncio
-import websockets
 
 WEEKSEC = 604800
 LIGHTSPEED = 2.99792458e8
+DISRUPTION_THRESHOLD = 50  # Threshold in meters for disruption detection
 
 parent_directory = os.getcwd()
 ephemeris_data_directory = os.path.join(parent_directory, 'data')
 sys.path.insert(0, parent_directory)
+# Get path to sample file in data directory, which is located in the parent directory of this notebook
+input_filepath = os.path.join(parent_directory, 'data', 'sample', 'beirut.txt')
 
-# Function to process incoming GNSS data
-def process_realtime_gnss_data(data):
-    global gnss_data_queue
-    measurements = pd.DataFrame(data['measurements'])
-    android_fixes = pd.DataFrame(data['fixes'])
+with open(input_filepath) as csvfile:
+    reader = csv.reader(csvfile)
+    for row in reader:
+        if row[0][0] == '#':
+            if 'Fix' in row[0]:
+                android_fixes = [row[1:]]
+            elif 'Raw' in row[0]:
+                measurements = [row[1:]]
+        else:
+            if row[0] == 'Fix':
+                android_fixes.append(row[1:])
+            elif row[0] == 'Raw':
+                measurements.append(row[1:])
 
-    # Format satellite IDs
-    measurements.loc[measurements['Svid'].str.len() == 1, 'Svid'] = '0' + measurements['Svid']
-    measurements.loc[measurements['ConstellationType'] == '1', 'Constellation'] = 'G'
-    measurements.loc[measurements['ConstellationType'] == '3', 'Constellation'] = 'R'
-    measurements['SatPRN (ID)'] = measurements['Constellation'] + measurements['Svid']
-    measurements = measurements.loc[measurements['Constellation'] == 'G']
+android_fixes = pd.DataFrame(android_fixes[1:], columns = android_fixes[0])
+measurements = pd.DataFrame(measurements[1:], columns = measurements[0])
 
-    # Convert columns to numeric representation
-    measurements['Cn0DbHz'] = pd.to_numeric(measurements['Cn0DbHz'])
-    measurements['TimeNanos'] = pd.to_numeric(measurements['TimeNanos'])
-    measurements['FullBiasNanos'] = pd.to_numeric(measurements['FullBiasNanos'])
-    measurements['ReceivedSvTimeNanos'] = pd.to_numeric(measurements['ReceivedSvTimeNanos'])
-    measurements['PseudorangeRateMetersPerSecond'] = pd.to_numeric(measurements['PseudorangeRateMetersPerSecond'])
-    measurements['ReceivedSvTimeUncertaintyNanos'] = pd.to_numeric(measurements['ReceivedSvTimeUncertaintyNanos'])
+# Format satellite IDs
+measurements.loc[measurements['Svid'].str.len() == 1, 'Svid'] = '0' + measurements['Svid']
+measurements.loc[measurements['ConstellationType'] == '1', 'Constellation'] = 'G'
+measurements.loc[measurements['ConstellationType'] == '3', 'Constellation'] = 'R'
 
-    if 'BiasNanos' in measurements.columns:
-        measurements['BiasNanos'] = pd.to_numeric(measurements['BiasNanos'])
-    else:
-        measurements['BiasNanos'] = 0
-    if 'TimeOffsetNanos' in measurements.columns:
-        measurements['TimeOffsetNanos'] = pd.to_numeric(measurements['TimeOffsetNanos'])
-    else:
-        measurements['TimeOffsetNanos'] = 0
+measurements['SatPRN (ID)'] = measurements['Constellation'] + measurements['Svid']
 
-    measurements['GpsTimeNanos'] = measurements['TimeNanos'] - (measurements['FullBiasNanos'] - measurements['BiasNanos'])
-    gpsepoch = datetime(1980, 1, 6, 0, 0, 0)
-    measurements['UnixTime'] = pd.to_datetime(measurements['GpsTimeNanos'], utc=True, origin=gpsepoch)
+# Remove all non-GPS measurements
+measurements = measurements.loc[measurements['Constellation'] == 'G']
 
-    measurements['Epoch'] = 0
-    measurements.loc[measurements['UnixTime'] - measurements['UnixTime'].shift() > timedelta(milliseconds=200), 'Epoch'] = 1
-    measurements['Epoch'] = measurements['Epoch'].cumsum()
+# Convert columns to numeric representation
+measurements['Cn0DbHz'] = pd.to_numeric(measurements['Cn0DbHz'])
+measurements['TimeNanos'] = pd.to_numeric(measurements['TimeNanos'])
+measurements['FullBiasNanos'] = pd.to_numeric(measurements['FullBiasNanos'])
+measurements['ReceivedSvTimeNanos']  = pd.to_numeric(measurements['ReceivedSvTimeNanos'])
+measurements['PseudorangeRateMetersPerSecond'] = pd.to_numeric(measurements['PseudorangeRateMetersPerSecond'])
+measurements['ReceivedSvTimeUncertaintyNanos'] = pd.to_numeric(measurements['ReceivedSvTimeUncertaintyNanos'])
 
-    measurements['tRxGnssNanos'] = measurements['TimeNanos'] + measurements['TimeOffsetNanos'] - (measurements['FullBiasNanos'].iloc[0] + measurements['BiasNanos'].iloc[0])
-    measurements['GpsWeekNumber'] = np.floor(1e-9 * measurements['tRxGnssNanos'] / WEEKSEC)
-    measurements['tRxSeconds'] = 1e-9 * measurements['tRxGnssNanos'] - WEEKSEC * measurements['GpsWeekNumber']
-    measurements['tTxSeconds'] = 1e-9 * (measurements['ReceivedSvTimeNanos'] + measurements['TimeOffsetNanos'])
-    measurements['prSeconds'] = measurements['tRxSeconds'] - measurements['tTxSeconds']
-    measurements['PrM'] = LIGHTSPEED * measurements['prSeconds']
-    measurements['PrSigmaM'] = LIGHTSPEED * 1e-9 * measurements['ReceivedSvTimeUncertaintyNanos']
+# A few measurement values are not provided by all phones
+# We'll check for them and initialize them with zeros if missing
+if 'BiasNanos' in measurements.columns:
+    measurements['BiasNanos'] = pd.to_numeric(measurements['BiasNanos'])
+else:
+    measurements['BiasNanos'] = 0
+if 'TimeOffsetNanos' in measurements.columns:
+    measurements['TimeOffsetNanos'] = pd.to_numeric(measurements['TimeOffsetNanos'])
+else:
+    measurements['TimeOffsetNanos'] = 0
 
-    gnss_data_queue.append(measurements)
+measurements['GpsTimeNanos'] = measurements['TimeNanos'] - (measurements['FullBiasNanos'] - measurements['BiasNanos'])
+gpsepoch = datetime(1980, 1, 6, 0, 0, 0)
+measurements['UnixTime'] = pd.to_datetime(measurements['GpsTimeNanos'], utc = True, origin=gpsepoch)
+measurements['UnixTime'] = measurements['UnixTime']
 
-# Define a global variable to store incoming GNSS data
-gnss_data_queue = []
+# Split data into measurement epochs
+measurements['Epoch'] = 0
+measurements.loc[measurements['UnixTime'] - measurements['UnixTime'].shift() > timedelta(milliseconds=200), 'Epoch'] = 1
+measurements['Epoch'] = measurements['Epoch'].cumsum()
 
-async def main():
-    global gnss_data_queue
-    manager = EphemerisManager(ephemeris_data_directory)
+# This should account for rollovers since it uses a week number specific to each measurement
+measurements['tRxGnssNanos'] = measurements['TimeNanos'] + measurements['TimeOffsetNanos'] - (measurements['FullBiasNanos'].iloc[0] + measurements['BiasNanos'].iloc[0])
+measurements['GpsWeekNumber'] = np.floor(1e-9 * measurements['tRxGnssNanos'] / WEEKSEC)
+measurements['tRxSeconds'] = 1e-9*measurements['tRxGnssNanos'] - WEEKSEC * measurements['GpsWeekNumber']
+measurements['tTxSeconds'] = 1e-9*(measurements['ReceivedSvTimeNanos'] + measurements['TimeOffsetNanos'])
+# Calculate pseudorange in seconds
+measurements['prSeconds'] = measurements['tRxSeconds'] - measurements['tTxSeconds']
+# Conver to meters
+measurements['PrM'] = LIGHTSPEED * measurements['prSeconds']
+measurements['PrSigmaM'] = LIGHTSPEED * 1e-9 * measurements['ReceivedSvTimeUncertaintyNanos']
 
-    while True:
-        if gnss_data_queue:
-            measurements = gnss_data_queue.pop(0)
-            epoch = 0
-            num_sats = 0
-            while num_sats < 5:
-                one_epoch = measurements.loc[(measurements['Epoch'] == epoch) & (measurements['prSeconds'] < 0.1)].drop_duplicates(subset='SatPRN (ID)')
-                if len(one_epoch) == 0:
-                    break
-                timestamp = one_epoch.iloc[0]['UnixTime'].to_pydatetime(warn=False)
-                one_epoch.set_index('SatPRN (ID)', inplace=True)
-                num_sats = len(one_epoch.index)
-                epoch += 1
+manager = EphemerisManager(ephemeris_data_directory)
 
-            if len(one_epoch) > 0:
-                sats = one_epoch.index.unique().tolist()
-                ephemeris = manager.get_ephemeris(timestamp, sats)
-                transmit_time = one_epoch['tTxSeconds']
-                sv_positions = calculate_satellite_position(ephemeris, transmit_time)
-                measurement_errors = one_epoch[['PrM', 'PrSigmaM']].to_numpy()
+epoch = 0
+num_sats = 0
+while num_sats < 5 :
+    one_epoch = measurements.loc[(measurements['Epoch'] == epoch) & (measurements['prSeconds'] < 0.1)].drop_duplicates(subset='SatPRN (ID)')
+    timestamp = one_epoch.iloc[0]['UnixTime'].to_pydatetime(warn=False)
+    one_epoch.set_index('SatPRN (ID)', inplace=True)
+    num_sats = len(one_epoch.index)
+    epoch += 1
 
-                positions = sv_positions[['x_k', 'y_k', 'z_k']].to_numpy()
-                x0 = np.array([0, 0, 0])
-                b0 = 0
+sats = one_epoch.index.unique().tolist()
+ephemeris = manager.get_ephemeris(timestamp, sats)
 
-                measured_location, b0, norm_dp = least_squares(positions, measurement_errors[:, 0], x0, b0)
-                lat, lon, alt = ecef_to_lla(measured_location)
+# Reorder the columns to include 'SvName' as the first column
+one_epoch_selected = one_epoch[['Cn0DbHz', 'UnixTime', 'tTxSeconds']]
+one_epoch_selected['tTxSeconds'] = pd.to_timedelta(one_epoch_selected['tTxSeconds'], unit='s')
+one_epoch_selected['GPS time'] = one_epoch_selected.apply(lambda row: row['UnixTime'] + row['tTxSeconds'], axis=1)
+# Drop the original 'UnixTime' and 'tTxSeconds' columns
+one_epoch_selected.drop(['UnixTime', 'tTxSeconds'], axis=1, inplace=True)
 
-                kml = simplekml.Kml()
-                kml.newpoint(name='Calculated Position', coords=[(lon, lat, alt)])
-                kml.save(os.path.join(parent_directory, 'calculated_position.kml'))
+# Required columns for ephemeris data
+required_columns = ['t_oe', 'sqrtA', 'deltaN', 'M_0', 'e', 'w', 'C_us', 'C_uc', 'C_rs', 'C_rc', 'i_0', 'iDot', 'C_is', 'C_ic', 'omega', 'OmegaDot']
 
-        await asyncio.sleep(1)
+# Check if all required columns are present in ephemeris
+missing_columns = [col for col in required_columns if col not in ephemeris.columns]
+if missing_columns:
+    raise KeyError(f"Missing columns in ephemeris data: {missing_columns}")
 
 def least_squares(xs, measured_pseudorange, x0, b0):
     dx = 100*np.ones(3)
     b = b0
+    # set up the G matrix with the right dimensions. We will later replace the first 3 columns
+    # note that b here is the clock bias in meters equivalent, so the actual clock bias is b/LIGHTSPEED
     G = np.ones((measured_pseudorange.size, 4))
     iterations = 0
     while np.linalg.norm(dx) > 1e-3:
@@ -123,7 +133,7 @@ def least_squares(xs, measured_pseudorange, x0, b0):
     return x0, b0, norm_dp
 
 def ecef_to_lla(location):
-    lla = navpy.ecef2lla(location, latlon_unit='deg')  # Specify latitude and longitude units
+    lla = navpy.ecef2lla(location)  # Specify latitude and longitude units
     latitude = lla[0]
     longitude = lla[1]
     altitude = lla[2]
@@ -133,56 +143,75 @@ def calculate_satellite_position(ephemeris, transmit_time):
     mu = 3.986005e14
     OmegaDot_e = 7.2921151467e-5
     F = -4.442807633e-10
-    sv_position = pd.DataFrame(index=ephemeris.index)
-
+    sv_position = pd.DataFrame()
+    sv_position['sv']= ephemeris.index
+    sv_position.set_index('sv', inplace=True)
     sv_position['t_k'] = transmit_time - ephemeris['t_oe']
-    A = ephemeris['sqrtA'].pow(2)
-    n_0 = np.sqrt(mu / A.pow(3))
+    A = ephemeris['sqrtA']**2
+    n_0 = np.sqrt(mu / A**3)
     n = n_0 + ephemeris['deltaN']
     M_k = ephemeris['M_0'] + n * sv_position['t_k']
     E_k = M_k
-    err = pd.Series(data=[1]*len(sv_position.index))
+    err = np.ones_like(E_k)
     i = 0
-    while err.abs().min() > 1e-8 and i < 10:
-        new_vals = M_k + ephemeris['e']*np.sin(E_k)
+    while np.max(np.abs(err)) > 1e-10 and i < 1000:
+        new_vals = M_k + ephemeris['e'] * np.sin(E_k)
         err = new_vals - E_k
         E_k = new_vals
-        i += 1
-
-    sinE_k = np.sin(E_k)
-    cosE_k = np.cos(E_k)
-    delT_r = F * ephemeris['e'].pow(ephemeris['sqrtA']) * sinE_k
-    delT_oc = transmit_time - ephemeris['t_oc']
-    sv_position['delT_sv'] = ephemeris['SVclockBias'] + ephemeris['SVclockDrift'] * delT_oc + ephemeris['SVclockDriftRate'] * delT_oc.pow(2)
-
-    v_k = np.arctan2(np.sqrt(1-ephemeris['e'].pow(2))*sinE_k,(cosE_k - ephemeris['e']))
-
-    Phi_k = v_k + ephemeris['omega']
-
-    sin2Phi_k = np.sin(2*Phi_k)
-    cos2Phi_k = np.cos(2*Phi_k)
-
-    du_k = ephemeris['C_uc']*cos2Phi_k + ephemeris['C_us']*sin2Phi_k
-    dr_k = ephemeris['C_rc']*cos2Phi_k + ephemeris['C_rs']*sin2Phi_k
-    di_k = ephemeris['C_ic']*cos2Phi_k + ephemeris['C_is']*sin2Phi_k
-
-    u_k = Phi_k + du_k
-    r_k = A * (1 - ephemeris['e'] * np.cos(E_k)) + dr_k
-    i_k = ephemeris['i_0'] + ephemeris['IDOT']*sv_position['t_k'] + di_k
-    x_k = r_k * np.cos(u_k)
-    y_k = r_k * np.sin(u_k)
-    e_k = OmegaDot_e * sv_position['t_k']
-    omeg_k = ephemeris['omega_0'] + e_k
-    sinik = np.sin(i_k)
-    cosik = np.cos(i_k)
-    sinok = np.sin(omeg_k)
-    cosok = np.cos(omeg_k)
-
-    sv_position['x_k'] = x_k * cosok - y_k * cosik * sinok
-    sv_position['y_k'] = x_k * sinok + y_k * cosik * cosok
-    sv_position['z_k'] = y_k * sinik
-
+        i = i + 1
+    v_k = np.arctan2(np.sqrt(1 - ephemeris['e']**2) * np.sin(E_k), np.cos(E_k) - ephemeris['e'])
+    Phi_k = v_k + ephemeris['w']
+    sv_position['u_k'] = Phi_k + ephemeris['C_us'] * np.sin(2*Phi_k) + ephemeris['C_uc'] * np.cos(2*Phi_k)
+    sv_position['r_k'] = A * (1 - ephemeris['e']*np.cos(E_k)) + ephemeris['C_rs'] * np.sin(2*Phi_k) + ephemeris['C_rc'] * np.cos(2*Phi_k)
+    sv_position['i_k'] = ephemeris['i_0'] + ephemeris['iDot'] * sv_position['t_k'] + ephemeris['C_is'] * np.sin(2*Phi_k) + ephemeris['C_ic'] * np.cos(2*Phi_k)
+    sv_position['x_k'] = sv_position['r_k'] * np.cos(sv_position['u_k'])
+    sv_position['y_k'] = sv_position['r_k'] * np.sin(sv_position['u_k'])
+    sv_position['Omega_k'] = ephemeris['OMEGA'] + (ephemeris['OMEGA_DOT'] - OmegaDot_e) * sv_position['t_k'] - OmegaDot_e * ephemeris['t_oe']
+    sv_position['x_kdot'] = -sv_position['y_k'] * np.cos(sv_position['i_k']) * (ephemeris['OMEGA_DOT'] - OmegaDot_e) - sv_position['r_k'] * (ephemeris['iDot']*np.cos(sv_position['u_k']) - 2 * np.pi / (ephemeris['A'] ** 1.5) * np.sin(sv_position['u_k']))
+    sv_position['y_kdot'] = sv_position['x_k'] * np.cos(sv_position['i_k']) * (ephemeris['OMEGA_DOT'] - OmegaDot_e) - sv_position['r_k'] * (ephemeris['iDot']*np.sin(sv_position['u_k']) + 2 * np.pi / (ephemeris['A'] ** 1.5) * np.cos(sv_position['u_k']))
+    sv_position['z_kdot'] = sv_position['r_k'] * ephemeris['iDot'] * np.cos(sv_position['u_k']) + sv_position['r_k'] * (2 * np.pi / (ephemeris['A'] ** 1.5)) * np.sin(sv_position['u_k'])
+    sv_position['ECEF_x'] = sv_position['x_k'] * np.cos(sv_position['Omega_k']) - sv_position['y_k'] * np.cos(sv_position['i_k']) * np.sin(sv_position['Omega_k'])
+    sv_position['ECEF_y'] = sv_position['x_k'] * np.sin(sv_position['Omega_k']) + sv_position['y_k'] * np.cos(sv_position['i_k']) * np.cos(sv_position['Omega_k'])
+    sv_position['ECEF_z'] = sv_position['y_k'] * np.sin(sv_position['i_k'])
     return sv_position
 
-if __name__ == '__main__':
-    asyncio.run(main())
+def calculate_positions(one_epoch, ephemeris):
+    transmit_time = one_epoch['tTxSeconds'] + one_epoch['tTxSeconds']
+    sv_position = calculate_satellite_position(ephemeris, transmit_time)
+    sv_position = sv_position.loc[sv_position.index.intersection(one_epoch.index)]
+    measured_pseudorange = one_epoch['PrM'].to_numpy()
+    xs = sv_position[['ECEF_x', 'ECEF_y', 'ECEF_z']].to_numpy()
+    x0 = np.zeros(3)
+    b0 = 0
+    position, bias, error = least_squares(xs, measured_pseudorange, x0, b0)
+    return position, bias, error
+
+# Calculate positions using primary satellites
+position_primary, bias_primary, error_primary = calculate_positions(one_epoch, ephemeris)
+latitude_primary, longitude_primary, altitude_primary = ecef_to_lla(position_primary)
+
+# Select weaker satellites
+weaker_sats = one_epoch[one_epoch['Cn0DbHz'] < one_epoch['Cn0DbHz'].mean()]
+
+# Check if there are enough weaker satellites for a position fix
+if len(weaker_sats) >= 5:
+    weaker_ephemeris = manager.get_ephemeris(timestamp, weaker_sats.index)
+    position_weaker, bias_weaker, error_weaker = calculate_positions(weaker_sats, weaker_ephemeris)
+    latitude_weaker, longitude_weaker, altitude_weaker = ecef_to_lla(position_weaker)
+    
+    # Calculate disruption based on the difference between primary and weaker satellite positions
+    disruption_distance = np.linalg.norm(np.array([latitude_primary - latitude_weaker, longitude_primary - longitude_weaker]) * np.array([111320, 40075000 / 360]))  # Convert degrees to meters for lat/lon
+    
+    disruption_detected = disruption_distance > DISRUPTION_THRESHOLD
+else:
+    disruption_detected = False
+
+# Create KML file for the GNSS data with disruption indication
+kml = simplekml.Kml()
+if disruption_detected:
+    kml.newpoint(name="Disruption Detected", coords=[(longitude_primary, latitude_primary, altitude_primary)], description=f"Position deviation: {disruption_distance:.2f} meters")
+else:
+    kml.newpoint(name="No Disruption", coords=[(longitude_primary, latitude_primary, altitude_primary)])
+
+output_kml_filepath = os.path.join(parent_directory, 'output', 'gnss_disruption.kml')
+kml.save(output_kml_filepath)
