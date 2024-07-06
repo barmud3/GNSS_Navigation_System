@@ -41,9 +41,9 @@ def create_kalman_filter():
                     [0, 1, 0, 0, 0, 0],
                     [0, 0, 1, 0, 0, 0]])
 
-    f.R = np.eye(3) * 10  # measurement uncertainty
-    f.Q = Q_discrete_white_noise(dim=3, dt=dt, var=0.1, block_size=2)
-    f.P *= 1000  # initial state uncertainty
+    f.R = np.eye(3) * 100  # Increased measurement uncertainty
+    f.Q = Q_discrete_white_noise(dim=3, dt=dt, var=0.01, block_size=2)  # Reduced process noise
+    f.P *= 10000  # Increased initial state uncertainty
     
     return f
 
@@ -76,6 +76,7 @@ def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
         b0 = b0 + db
 
     norm_dp = np.linalg.norm(deltaP)
+    print(f"WLS result: x0={x0}, b0={b0}, norm_dp={norm_dp}")
     return x0, b0, norm_dp
 
 
@@ -102,12 +103,16 @@ def positioning_algorithm(csv_file):
     df_times = df['GPS time'].unique()
     x0 = np.array([0, 0, 0])
     b0 = 0
+
+    
     
     kf = create_kalman_filter()
     kf.x = np.array([0, 0, 0, 0, 0, 0])  # initial state
     
     disruption_detected = False
     disruption_count = 0
+    disruption_threshold = 500 
+    max_disruption_count = 10   
     
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
@@ -124,30 +129,32 @@ def positioning_algorithm(csv_file):
         kf.update(z)
         
         # Check for disruption
-        if np.linalg.norm(kf.y) > 100:  # adjust threshold as needed
+        innovation_magnitude = np.linalg.norm(kf.y)
+        if innovation_magnitude > disruption_threshold:
             disruption_count += 1
-            if disruption_count > 5:  # adjust number of consecutive disruptions as needed
+            print(f"Potential disruption at time {time}: innovation magnitude = {innovation_magnitude}")
+            if disruption_count > max_disruption_count:
                 if not disruption_detected:
-                    print("Disruption detected!")
+                    print(f"Disruption detected at time {time}!")
                     disruption_detected = True
         else:
-            disruption_count = 0
-            if disruption_detected:
-                print("Disruption ended. Continuing normal operation.")
+            disruption_count = max(0, disruption_count - 1)  # Gradually decrease the count
+            if disruption_detected and disruption_count == 0:
+                print(f"Disruption ended at time {time}. Continuing normal operation.")
                 disruption_detected = False
         
         if not disruption_detected:
             lla = convertXYZtoLLA(kf.x[:3])
             data.append([time, kf.x[0], kf.x[1], kf.x[2], lla[0], lla[1], lla[2]])
         
-        # Add this logging
-        if len(data) % 100 == 0:  # Log every 100th point to avoid excessive output
+        # Log every 100th point to avoid excessive output
+        if len(data) % 100 == 0:
             print(f"Sample position: Time={time}, Lat={lla[0]}, Lon={lla[1]}, Alt={lla[2]}")
         
         # Update previous estimates for next iteration
         x0 = kf.x[:3]
         b0 = bias_estimate
-
+        
     df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
 
     print(f"Unique latitude values: {df_ans['Lat'].nunique()}")
@@ -377,7 +384,14 @@ def original_gnss_to_position(input_filepath):
         filename = os.path.splitext(os.path.basename(input_filepath))[0]
         input_fpath = os.path.join(outcomes_dir, filename + '.csv')
 
+        print(f"Processing file: {input_fpath}")
         with open(input_fpath, newline='') as csvfile:
+            df = pd.read_csv(csvfile)
+            print(f"Input data shape: {df.shape}")
+            print(f"Input data columns: {df.columns}")
+            print(f"Sample of input data:\n{df.head()}")
+            print(f"Unique satellite PRNs: {df['SatPRN (ID)'].nunique()}")
+            
             positional_df = positioning_algorithm(csvfile)
         
         print(f"Positioning algorithm output shape: {positional_df.shape}")
@@ -397,26 +411,7 @@ def original_gnss_to_position(input_filepath):
         
         print(f"Filtered data shape: {df_filtered.shape}")
         print(f"Sample of filtered data:\n{df_filtered.head()}")
-
-        print("Creating KML coordinates...")
-        kml = simplekml.Kml()
-        coords = create_kml_coordinates(df_filtered, kml)
-        df_filtered.to_csv(os.path.join(outcomes_dir, f"{filename}_filtered.csv"), index=False)
-        print(f"Saved filtered data to {filename}_filtered.csv for inspection")
-
-        print(f"Number of valid coordinates: {len(coords)}")
-        if not coords:
-            print("No valid coordinates for KML file. Check filtering criteria.")
-            return
-
-        create_kml_linestring(kml, coords)
-
-        output_kml_filepath = os.path.join(outcomes_dir, filename + '.kml')
-        kml.save(output_kml_filepath)
-
-        print(f"KML file saved: {output_kml_filepath}")
-        print(f"Number of points in KML: {len(coords)}")
-
+        
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         import traceback
