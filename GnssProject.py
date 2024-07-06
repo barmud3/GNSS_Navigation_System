@@ -5,10 +5,9 @@ import numpy as np
 import navpy
 from gnssutils import ephemeris_manager
 import simplekml
+from tkinter import Tk
 from tkinter.filedialog import askopenfilename
-from filterpy.kalman import KalmanFilter
-from filterpy.common import Q_discrete_white_noise
-
+import subprocess
 
 LIGHTSPEED = 2.99792458e8
 ephemeris_data_directory = os.path.join('data')
@@ -20,40 +19,23 @@ outcomes_dir = 'outcomes'
 os.makedirs(gnss_log_samples_dir, exist_ok=True)
 os.makedirs(outcomes_dir, exist_ok=True)
 
-# Constants for corruption check
-BEIRUT_LAT = 33.82
-BEIRUT_LON = 35.49
-CAIRO_LAT = [30.71, 30.08]
-CAIRO_LON = [31.35, 31.78]
+def find_latest_gnss_log():
+    try:
+        # Resetting the ADB command to find the latest file in /sdcard/Download directory
+        adb_command = ["C:/Users/User/Documents/adb/adb.exe", "shell", "ls", "-t", "/sdcard/Download/gnss_log*.txt"]
 
-def create_kalman_filter():
-    f = KalmanFilter(dim_x=6, dim_z=3)
-    dt = 1.0  # time step
+        # Running the ADB command and capturing the output
+        result = subprocess.run(adb_command, capture_output=True, text=True, check=True)
 
-    f.F = np.array([[1, 0, 0, dt, 0, 0],
-                    [0, 1, 0, 0, dt, 0],
-                    [0, 0, 1, 0, 0, dt],
-                    [0, 0, 0, 1, 0, 0],
-                    [0, 0, 0, 0, 1, 0],
-                    [0, 0, 0, 0, 0, 1]])
+        # Sorting files by creation date and selecting the latest file
+        files_list = result.stdout.strip().split('\n')
+        latest_file = files_list[0]  # The last file in the sorted list is the newest file
 
-    f.H = np.array([[1, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0]])
+        return latest_file.strip()  # Returning the name of the latest file
 
-    f.R = np.eye(3) * 100  # Increased measurement uncertainty
-    f.Q = Q_discrete_white_noise(dim=3, dt=dt, var=0.01, block_size=2)  # Reduced process noise
-    f.P *= 10000  # Increased initial state uncertainty
-    
-    return f
-
-def is_corrupted_position(lat, lon):
-    lat_rounded = round(lat, 2)
-    lon_rounded = round(lon, 2)
-    if (lat_rounded == BEIRUT_LAT and lon_rounded == BEIRUT_LON) or \
-       (CAIRO_LAT[0] == lat_rounded or lat_rounded == CAIRO_LAT[1] and CAIRO_LON[0] == lon_rounded or lon_rounded == CAIRO_LON[1]):
-        return True
-    return False
+    except subprocess.CalledProcessError as e:
+        print(f"Error finding latest file: {e}")
+        return None
 
 def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
     dx = 100 * np.ones(3)
@@ -76,26 +58,8 @@ def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
         b0 = b0 + db
 
     norm_dp = np.linalg.norm(deltaP)
-    print(f"WLS result: x0={x0}, b0={b0}, norm_dp={norm_dp}")
     return x0, b0, norm_dp
 
-
-
-def plot_positions(kml, name, coords, color):
-    # Add line string
-    ls = kml.newlinestring(name=name)
-    ls.coords = coords
-    ls.extrude = 1
-    ls.altitudemode = simplekml.AltitudeMode.relativetoground
-    ls.style.linestyle.width = 2
-    ls.style.linestyle.color = color
-
-    # Add individual points
-    for i, coord in enumerate(coords):
-        pnt = kml.newpoint(name=f'Point {i+1}')
-        pnt.coords = [coord]
-        pnt.style.iconstyle.color = color
-        pnt.style.iconstyle.scale = 0.5
 
 def positioning_algorithm(csv_file):
     df = pd.read_csv(csv_file)
@@ -103,69 +67,24 @@ def positioning_algorithm(csv_file):
     df_times = df['GPS time'].unique()
     x0 = np.array([0, 0, 0])
     b0 = 0
-
-    
-    
-    kf = create_kalman_filter()
-    kf.x = np.array([0, 0, 0, 0, 0, 0])  # initial state
-    
-    disruption_detected = False
-    disruption_count = 0
-    disruption_threshold = 500 
-    max_disruption_count = 10   
-    
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
         df_gps_time_sorted = df_gps_time.sort_values(by='SatPRN (ID)')
         xs = df_gps_time_sorted[['Sat.X', 'Sat.Y', 'Sat.Z']].values
         measured_pseudorange = df_gps_time_sorted['Pseudo-Range'].values
-        weights = df_gps_time_sorted['CN0'].values
-        
+        weights = df_gps_time_sorted['CN0'].values  # Use CN0 values as weights
         x_estimate, bias_estimate, norm_dp = weighted_least_squares(xs, measured_pseudorange, x0, b0, weights)
-        
-        # Kalman filter prediction and update
-        kf.predict()
-        z = x_estimate[:3]  # measurement is the position estimate
-        kf.update(z)
-        
-        # Check for disruption
-        innovation_magnitude = np.linalg.norm(kf.y)
-        if innovation_magnitude > disruption_threshold:
-            disruption_count += 1
-            print(f"Potential disruption at time {time}: innovation magnitude = {innovation_magnitude}")
-            if disruption_count > max_disruption_count:
-                if not disruption_detected:
-                    print(f"Disruption detected at time {time}!")
-                    disruption_detected = True
-        else:
-            disruption_count = max(0, disruption_count - 1)  # Gradually decrease the count
-            if disruption_detected and disruption_count == 0:
-                print(f"Disruption ended at time {time}. Continuing normal operation.")
-                disruption_detected = False
-        
-        if not disruption_detected:
-            lla = convertXYZtoLLA(kf.x[:3])
-            data.append([time, kf.x[0], kf.x[1], kf.x[2], lla[0], lla[1], lla[2]])
-        
-        # Log every 100th point to avoid excessive output
-        if len(data) % 100 == 0:
-            print(f"Sample position: Time={time}, Lat={lla[0]}, Lon={lla[1]}, Alt={lla[2]}")
-        
         # Update previous estimates for next iteration
-        x0 = kf.x[:3]
+        x0 = x_estimate
         b0 = bias_estimate
-        
+        lla = convertXYZtoLLA(x_estimate)
+        data.append([time, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
+
     df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
-
-    print(f"Unique latitude values: {df_ans['Lat'].nunique()}")
-    print(f"Unique longitude values: {df_ans['Lon'].nunique()}")
-    print(f"Range of altitude values: {df_ans['Alt'].min()} to {df_ans['Alt'].max()}")
-
     return df_ans
 
 def convertXYZtoLLA(val):
     return navpy.ecef2lla(val)
-
 
 def ParseToCSV(input_filepath):
     filename = os.path.splitext(os.path.basename(input_filepath))[0]
@@ -206,9 +125,7 @@ def ParseToCSV(input_filepath):
     # Convert columns to numeric representation
 
     # Filter by C/N0 (Carrier-to-Noise Density Ratio)
-    min_cn0_threshold = 30  # CN0 threshold
     measurements['Cn0DbHz'] = pd.to_numeric(measurements['Cn0DbHz'])  # Ensure Cn0DbHz column is numeric
-    measurements = measurements[measurements['Cn0DbHz'] >= min_cn0_threshold]
 
     measurements['TimeNanos'] = pd.to_numeric(measurements['TimeNanos'])
     measurements['FullBiasNanos'] = pd.to_numeric(measurements['FullBiasNanos'])
@@ -379,78 +296,96 @@ def ParseToCSV(input_filepath):
 
 
 def original_gnss_to_position(input_filepath):
-    try:
-        ParseToCSV(input_filepath)
-        filename = os.path.splitext(os.path.basename(input_filepath))[0]
-        input_fpath = os.path.join(outcomes_dir, filename + '.csv')
+    ParseToCSV(input_filepath)
+    filename = os.path.splitext(os.path.basename(input_filepath))[0]
 
-        print(f"Processing file: {input_fpath}")
-        with open(input_fpath, newline='') as csvfile:
-            df = pd.read_csv(csvfile)
-            print(f"Input data shape: {df.shape}")
-            print(f"Input data columns: {df.columns}")
-            print(f"Sample of input data:\n{df.head()}")
-            print(f"Unique satellite PRNs: {df['SatPRN (ID)'].nunique()}")
-            
-            positional_df = positioning_algorithm(csvfile)
-        
-        print(f"Positioning algorithm output shape: {positional_df.shape}")
-        print(f"Sample of positioning data:\n{positional_df.head()}")
-        
-        if positional_df.empty:
-            print("No valid data available after processing. Check input data quality.")
-            return
-        
-        print("Merging with existing data...")
-        existing_df = pd.read_csv(input_fpath)
-        merged_df = pd.concat([existing_df, positional_df], axis=1)
-        merged_df.to_csv(input_fpath, index=False)
+    input_fpath = os.path.join(outcomes_dir, filename + '.csv')
 
-        print("Applying moving average filter...")
-        df_filtered = moving_average_filter(merged_df)
-        
-        print(f"Filtered data shape: {df_filtered.shape}")
-        print(f"Sample of filtered data:\n{df_filtered.head()}")
-        
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    # Open the CSV file
+    csvfile = open(input_fpath, newline='')
 
-def create_kml_coordinates(df, kml):
+    positional_df = positioning_algorithm(csvfile)
+
+    print("Positional Algo succeeded, creating CSV and KML files.")
+    existing_df = pd.read_csv(input_fpath)
+    existing_df = pd.concat([existing_df, positional_df], axis=1)
+    existing_df.to_csv(input_fpath, index=False)
+
+    # Create a KML object
+    kml = simplekml.Kml()
+
+    df_filtered = moving_average_filter(existing_df)
+
+    # Accumulate coordinates for the LineString
     coords = []
-    for index, row in df.iterrows():
-        if pd.notna(row['Lat']) and pd.notna(row['Lon']):
-            # Include points even if altitude is missing or unusual
-            alt = row['Alt'] if pd.notna(row['Alt']) else 0
-            coords.append((row['Lon'], row['Lat'], alt))
-            pnt = kml.newpoint(name=str(row['GPS_Unique_Time']))
-            pnt.coords = [(row['Lon'], row['Lat'], alt)]
-            if pd.notna(row['GPS_Unique_Time']):
-                pnt.timestamp.when = pd.to_datetime(row['GPS_Unique_Time']).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return coords
 
-def create_kml_linestring(kml, coords):
-    if coords:
-        linestring = kml.newlinestring(name="Path", description="GPS Path")
-        linestring.coords = coords
-        linestring.altitudemode = simplekml.AltitudeMode.relativetoground
-        linestring.style.linestyle.color = simplekml.Color.red
-        linestring.style.linestyle.width = 3
+    # Iterate over the data
+    for index, row in df_filtered.iterrows():
+        gps_time = row['GPS_Unique_Time']
+
+        if 0 < row['Alt'] < 1000:
+
+            coords.append((row['Lon'], row['Lat'], row['Alt']))
+
+            # Create a point placemark
+            pnt = kml.newpoint(name=str(row['GPS_Unique_Time']), coords=[(row['Lon'], row['Lat'], row['Alt'])])
+
+            # Add time information to the placemark
+            gps_times = pd.to_datetime(gps_time)
+            # Debug print to check the altitude before filtering
+            # print(f"Processing row {index}: Alt={row['Alt']} GPSTime:{gps_time}")
+            if not pd.isna(gps_times):
+                pnt.timestamp.when = gps_times.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    # Create a LineString for the path
+    linestring = kml.newlinestring(name="Path", description="GPS Path")
+    linestring.coords = coords
+    linestring.altitudemode = simplekml.AltitudeMode.relativetoground  # Adjust altitude mode as needed
+
+    linestring.style.linestyle.color = simplekml.Color.red  # Change color to red
+    linestring.style.linestyle.width = 3  # Change width if needed
+
+    # Specify the path for saving the KML file
+    # output_path = os.path.join(filename + '.kml')
+    output_kml_filepath = os.path.join(outcomes_dir,filename + '.kml')
+    # Save the KML file
+    kml.save(output_kml_filepath)
 
 
 # Added for mor accuracy creating the kml.
 def moving_average_filter(df, window_size=5):
-    for col in ['Pos_X', 'Pos_Y', 'Pos_Z', 'Lat', 'Lon', 'Alt']:
-        df[col] = df[col].rolling(window=window_size, min_periods=1).mean()
+    # Ensure that Alt values are non-negative before applying the filter
+    # df = df[df['Alt'] >= 0].copy()
+
+    df['Pos_X'] = df['Pos_X'].rolling(window=window_size, min_periods=1).mean()
+    df['Pos_Y'] = df['Pos_Y'].rolling(window=window_size, min_periods=1).mean()
+    df['Pos_Z'] = df['Pos_Z'].rolling(window=window_size, min_periods=1).mean()
+    df['Lat'] = df['Lat'].rolling(window=window_size, min_periods=1).mean()
+    df['Lon'] = df['Lon'].rolling(window=window_size, min_periods=1).mean()
+    df['Alt'] = df['Alt'].rolling(window=window_size, min_periods=1).mean()
+
+    rolling_avg_alt = df['Alt'].rolling(window=window_size, min_periods=1).mean()
+
+    # Calculate the absolute difference from rolling average
+    diff_from_avg = np.abs(df['Alt'] - rolling_avg_alt)
+
+    # Replace values in 'Alt' column with -100000 where difference is large
+    df.loc[diff_from_avg > 50, 'Alt'] = -100000
 
     return df
 
 
 def main():
     while True:
+        # Hide the main tkinter window
+        root = Tk()
+        root.withdraw()
+        root.focus_force()
+        root.attributes('-topmost', True)
+
         # Show an "Open" dialog box and return the path to the selected file
         input_filepath = askopenfilename(title="Select GNSS Log File", initialdir=gnss_log_samples_dir, filetypes=[("Txt files", "*.txt")])
+        root.destroy()
         if not input_filepath:
             print("No file selected. Exiting...")
             sys.exit()
