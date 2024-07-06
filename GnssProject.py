@@ -23,7 +23,6 @@ def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
     dx = 100 * np.ones(3)
     b = b0
     G = np.ones((measured_pseudorange.size, 4))
-    iterations = 0
 
     while np.linalg.norm(dx) > 1e-3:
         r = np.linalg.norm(xs - x0, axis=1)
@@ -42,8 +41,7 @@ def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
     norm_dp = np.linalg.norm(deltaP)
     return x0, b0, norm_dp
 
-
-def positioning_algorithm(csv_file):
+def positioning_algorithm_distrub(csv_file):
     df = pd.read_csv(csv_file)
     data = []
     df_times = df['GPS time'].unique()
@@ -64,9 +62,9 @@ def positioning_algorithm(csv_file):
             xs = group_data[['Sat.X', 'Sat.Y', 'Sat.Z']].values
             measured_pseudorange = group_data['Pseudo-Range'].values
             weights = group_data['CN0'].values
-            
             x_estimate, bias_estimate, norm_dp = weighted_least_squares(xs, measured_pseudorange, x0, b0, weights)
             
+                
             # Update previous estimates for next iteration
             x0 = x_estimate
             b0 = bias_estimate
@@ -78,6 +76,28 @@ def positioning_algorithm(csv_file):
     
     print(count)
     df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Group", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
+    return df_ans
+
+def positioning_algorithm_unDistrub(csv_file):
+    df = pd.read_csv(csv_file)
+    data = []
+    df_times = df['GPS time'].unique()
+    x0 = np.array([0, 0, 0])
+    b0 = 0
+    for time in df_times:
+        df_gps_time = df[df['GPS time'] == time]
+        df_gps_time_sorted = df_gps_time.sort_values(by='SatPRN (ID)')
+        xs = df_gps_time_sorted[['Sat.X', 'Sat.Y', 'Sat.Z']].values
+        measured_pseudorange = df_gps_time_sorted['Pseudo-Range'].values
+        weights = df_gps_time_sorted['CN0'].values  # Use CN0 values as weights
+        x_estimate, bias_estimate, norm_dp = weighted_least_squares(xs, measured_pseudorange, x0, b0, weights)
+        # Update previous estimates for next iteration
+        x0 = x_estimate
+        b0 = bias_estimate
+        lla = convertXYZtoLLA(x_estimate)
+        data.append([time, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
+
+    df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
     return df_ans
 
 def convertXYZtoLLA(val):
@@ -300,8 +320,10 @@ def original_gnss_to_position(input_filepath):
 
     # Open the CSV file
     csvfile = open(input_fpath, newline='')
-
-    positional_df = positioning_algorithm(csvfile)
+    if detector.isDistrubt :
+        positional_df = positioning_algorithm_distrub(csvfile)        
+    else : 
+        positional_df = positioning_algorithm_unDistrub(csvfile)
 
     print("Positional Algo succeeded, creating CSV and KML files.")
     existing_df = pd.read_csv(input_fpath)
@@ -371,10 +393,11 @@ def moving_average_filter(df, window_size=5):
 
     return df
 
+gnss_data_file = "C:\\Users\\בר\\OneDrive\\שולחן העבודה\\מדמח\\שנה ג\\רובוטים אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\Driving2.txt"
+detector = GNSSDisruptionDetector(gnss_data_file, num_satellites=2)
 
 def main():
-    gnss_data_file = "C:\\Users\\בר\\OneDrive\\שולחן העבודה\\מדמח\\שנה ג\\רובוטים אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\beirut2.txt"
-    detector = GNSSDisruptionDetector(gnss_data_file, num_satellites=2)
+    
     detector.process_data()
     # Filter out the specific warning
     warnings.filterwarnings("ignore", message="In a future version of pandas all arguments of DataFrame.drop except for the argument 'labels' will be keyword-only")

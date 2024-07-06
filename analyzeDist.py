@@ -6,6 +6,7 @@ class GNSSDisruptionDetector:
         self.num_satellites = num_satellites
         self.strongest_satellites = []
         self.weakest_satellites = []
+        self.isDistrubt = False
 
     @staticmethod
     def calculate_average_position(satellites):
@@ -76,8 +77,10 @@ class GNSSDisruptionDetector:
             # Check if differences exceed thresholds
             if lat_diff > lat_threshold or lon_diff > lon_threshold or alt_diff > alt_threshold:
                 print("Found disruption in GNSS data based on location differences.")
+                self.isDistrubt = True
             else:
                 print("No disruption detected in GNSS data based on location differences.")
+                self.isDistrubt = False
 
         except FileNotFoundError:
             print(f"File not found: {self.gnss_data_file}")
