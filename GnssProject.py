@@ -19,24 +19,6 @@ outcomes_dir = 'outcomes'
 os.makedirs(gnss_log_samples_dir, exist_ok=True)
 os.makedirs(outcomes_dir, exist_ok=True)
 
-def find_latest_gnss_log():
-    try:
-        # Resetting the ADB command to find the latest file in /sdcard/Download directory
-        adb_command = ["C:/Users/User/Documents/adb/adb.exe", "shell", "ls", "-t", "/sdcard/Download/gnss_log*.txt"]
-
-        # Running the ADB command and capturing the output
-        result = subprocess.run(adb_command, capture_output=True, text=True, check=True)
-
-        # Sorting files by creation date and selecting the latest file
-        files_list = result.stdout.strip().split('\n')
-        latest_file = files_list[0]  # The last file in the sorted list is the newest file
-
-        return latest_file.strip()  # Returning the name of the latest file
-
-    except subprocess.CalledProcessError as e:
-        print(f"Error finding latest file: {e}")
-        return None
-
 def weighted_least_squares(xs, measured_pseudorange, x0, b0, weights):
     dx = 100 * np.ones(3)
     b = b0
