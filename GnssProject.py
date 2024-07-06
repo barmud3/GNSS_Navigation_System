@@ -5,9 +5,9 @@ import numpy as np
 import navpy
 from gnssutils import ephemeris_manager
 import simplekml
-from tkinter import Tk
-from tkinter.filedialog import askopenfilename
 import subprocess
+from analyzeDist import GNSSDisruptionDetector
+import warnings
 
 LIGHTSPEED = 2.99792458e8
 ephemeris_data_directory = os.path.join('data')
@@ -358,25 +358,12 @@ def moving_average_filter(df, window_size=5):
 
 
 def main():
-    while True:
-        # Hide the main tkinter window
-        root = Tk()
-        root.withdraw()
-        root.focus_force()
-        root.attributes('-topmost', True)
-
-        # Show an "Open" dialog box and return the path to the selected file
-        input_filepath = askopenfilename(title="Select GNSS Log File", initialdir=gnss_log_samples_dir, filetypes=[("Txt files", "*.txt")])
-        root.destroy()
-        if not input_filepath:
-            print("No file selected. Exiting...")
-            sys.exit()
-
-        original_gnss_to_position(input_filepath)
-
-        again = input("Do you want to continue for another run? (1 for yes, 2 for no): ").strip()
-        if again == '2':
-            break
+    gnss_data_file = "C:\\Users\\בר\\OneDrive\\שולחן העבודה\\מדמח\\שנה ג\\רובוטים אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\Driving2.txt"
+    detector = GNSSDisruptionDetector(gnss_data_file, num_satellites=2)
+    detector.process_data()
+    # Filter out the specific warning
+    warnings.filterwarnings("ignore", message="In a future version of pandas all arguments of DataFrame.drop except for the argument 'labels' will be keyword-only")
+    original_gnss_to_position(gnss_data_file)
 
 if __name__ == "__main__":
     main()
