@@ -76,10 +76,10 @@ class GNSSDisruptionDetector:
 
             # Check if differences exceed thresholds
             if lat_diff > lat_threshold or lon_diff > lon_threshold or alt_diff > alt_threshold:
-                print("Found disruption in GNSS data based on location differences.")
+                # print("Found disruption in GNSS data based on location differences.")
                 self.isDistrubt = True
             else:
-                print("No disruption detected in GNSS data based on location differences.")
+                # print("No disruption detected in GNSS data based on location differences.")
                 self.isDistrubt = False
 
         except FileNotFoundError:

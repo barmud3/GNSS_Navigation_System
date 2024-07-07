@@ -147,6 +147,9 @@ def ParseToCSV(input_filepath):
 
     # Filter by C/N0 (Carrier-to-Noise Density Ratio)
     measur['Cn0DbHz'] = pd.to_numeric(measur['Cn0DbHz'])  # Ensure Cn0DbHz column is numeric
+    if(detector.isDistrubt == False):
+        min_cn0_threshold = 30  # CN0 threshold
+        measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
 
     measur['TimeNanos'] = pd.to_numeric(measur['TimeNanos'])
     measur['FullBiasNanos'] = pd.to_numeric(measur['FullBiasNanos'])
@@ -397,7 +400,7 @@ def movingAverageFilter(df, window_size=5):
 
 
 the_data_gnss_file = "C:\\Users\\בר\\OneDrive\\שולחן העבודה\\מדמח\\שנה ג\\רובוטים " \
-                 "אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\Driving2.txt "
+                 "אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\beirut2.txt "
 detector = GNSSDisruptionDetector(the_data_gnss_file, num_satellites=2)
 
 
@@ -408,6 +411,7 @@ def main():
     warnings.filterwarnings("ignore", message="In a future version of pandas all arguments of DataFrame.drop except "
                                               "for the argument 'labels' will be keyword-only")
     originalGnssToPosition(the_data_gnss_file)
+    print("Is data distrubt :" , detector.isDistrubt)
 
 
 if __name__ == "__main__":
