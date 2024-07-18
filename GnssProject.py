@@ -75,7 +75,6 @@ def positioningAlgorithmDistrub(csv_file):
 
         counter += 1
 
-    print(counter)
     df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Group", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
     return df_ans
 
@@ -106,6 +105,86 @@ def positioningAlgorithmUndistrub(csv_file):
 def convertXYZtoLLA(val):
     return navpy.ecef2lla(val)
 
+def calculate_doppler(eph, pos_rcv, time):
+    # Constants
+    GM = 3.986005e14  # Earth's gravitational constant
+    OMEGA_E = 7.2921151467e-5  # Earth's rotation rate
+
+    # Extract ephemeris parameters
+    sqrtA = eph['sqrtA']
+    e = eph['e']
+    i_0 = eph['i_0']
+    OMEGA_0 = eph['Omega_0']
+    omega = eph['omega']
+    M_0 = eph['M_0']
+    deltaN = eph['deltaN']
+    IDOT = eph['IDOT']
+    OmegaDot = eph['OmegaDot']
+    t_oe = eph['t_oe']
+
+    # Semi-major axis
+    A = sqrtA ** 2
+
+    # Time since reference epoch
+    tk = time - t_oe
+
+    # Corrected mean motion
+    n_0 = np.sqrt(GM / A**3)
+    n = n_0 + deltaN
+
+    # Mean anomaly
+    M = M_0 + n * tk
+
+    # Eccentric anomaly (solve Kepler's equation)
+    E = M
+    for _ in range(10):  # Iterative solution
+        E = M + e * np.sin(E)
+
+    # True anomaly
+    nu = 2 * np.arctan2(np.sqrt(1+e) * np.sin(E/2), np.sqrt(1-e) * np.cos(E/2))
+
+    # Argument of latitude
+    phi = nu + omega
+
+    # Orbital radius
+    r = A * (1 - e * np.cos(E))
+
+    # Positions in orbital plane
+    x_orb = r * np.cos(phi)
+    y_orb = r * np.sin(phi)
+
+    # Corrected longitude of ascending node
+    OMEGA = OMEGA_0 + (OmegaDot - OMEGA_E) * tk - OMEGA_E * t_oe
+
+    # ECEF coordinates
+    x = x_orb * np.cos(OMEGA) - y_orb * np.cos(i_0) * np.sin(OMEGA)
+    y = x_orb * np.sin(OMEGA) + y_orb * np.cos(i_0) * np.cos(OMEGA)
+    z = y_orb * np.sin(i_0)
+
+    # Velocity in orbital plane
+    Edot = n / (1 - e * np.cos(E))
+    xdot_orb = -A * n * np.sin(E) * Edot
+    ydot_orb = A * n * np.sqrt(1 - e**2) * np.cos(E) * Edot
+
+    # ECEF velocity
+    xdot = xdot_orb * np.cos(OMEGA) - ydot_orb * np.cos(i_0) * np.sin(OMEGA) - y * OmegaDot
+    ydot = xdot_orb * np.sin(OMEGA) + ydot_orb * np.cos(i_0) * np.cos(OMEGA) + x * OmegaDot
+    zdot = ydot_orb * np.sin(i_0)
+
+    # Line of sight vector
+    los = np.array([x, y, z]) - pos_rcv
+    los = los / np.linalg.norm(los)
+
+    # Relative velocity
+    v_rel = np.array([xdot, ydot, zdot]) - np.cross(np.array([0, 0, OMEGA_E]), pos_rcv)
+
+    # Doppler shift
+    f_L1 = 1575.42e6  # L1 frequency
+    c = 299792458  # Speed of light
+    doppler = -np.dot(los, v_rel) * f_L1 / c
+
+    return doppler
+
 
 def ParseToCSV(input_filepath):
     filename = os.path.splitext(os.path.basename(input_filepath))[0]
@@ -132,13 +211,18 @@ def ParseToCSV(input_filepath):
 
     # Format satellite IDs
     measur.loc[measur['Svid'].str.len() == 1, 'Svid'] = '0' + measur['Svid']
-    measur.loc[measur['ConstellationType'] == '1', 'Constellation'] = 'G'
-    measur.loc[measur['ConstellationType'] == '3', 'Constellation'] = 'R'
+    constellation_map = {
+    '1': 'G',  # GPS
+    '3': 'R',  # GLONASS
+    '5': 'C',  # BeiDou
+    '6': 'E'   # Galileo
+    }
+    measur['Constellation'] = measur['ConstellationType'].map(constellation_map)
     measur['SvName'] = measur['Constellation'] + measur['Svid']
 
-    # Remove all non-GPS measurements
-    measur = measur.loc[measur['Constellation'] == 'G']
 
+    measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'E', 'C'])]
+    
     # Extract SatPRN (ID) from the data
     satPRN = measur['SvName'].tolist()
     uniqSatPRN = measur['SvName'].unique().tolist()
@@ -147,9 +231,9 @@ def ParseToCSV(input_filepath):
 
     # Filter by C/N0 (Carrier-to-Noise Density Ratio)
     measur['Cn0DbHz'] = pd.to_numeric(measur['Cn0DbHz'])  # Ensure Cn0DbHz column is numeric
-    if(detector.isDistrubt == False):
-        min_cn0_threshold = 30  # CN0 threshold
-        measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
+    # if(detector.isDistrubt == False):
+    #     min_cn0_threshold = 25  # CN0 threshold
+    #     measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
 
     measur['TimeNanos'] = pd.to_numeric(measur['TimeNanos'])
     measur['FullBiasNanos'] = pd.to_numeric(measur['FullBiasNanos'])
@@ -195,9 +279,9 @@ def ParseToCSV(input_filepath):
     measur['PrM'] = SPEEDOFLIGHT * measur['prSeconds']
     measur['PrSigmaM'] = SPEEDOFLIGHT * 1e-9 * measur['ReceivedSvTimeUncertaintyNanos']
     manager = ephemeris_manager.EphemerisManager(ephemeris_data_dir)
+    
     # Calculate satellite Y,X,Z coordinates
     # loop to go through each timezone of satellites
-
     for i in range(len(measur['Epoch'].unique())):
         epoch = i
         num_sats = 0
@@ -217,6 +301,8 @@ def ParseToCSV(input_filepath):
         if len(one_epoch) >= 2:  # Ensure one_epoch is valid before proceeding
             sats = one_epoch.index.unique().tolist()
             ephemeris = manager.get_ephemeris(times_tamp, sats)
+            # input_path = os.path.join(outcomes_dir, 'ephemeris.csv')
+            # ephemeris.to_csv(input_path, index=False)
 
         def findSatellitePosition(ephem, transmit_time):
             mu = 3.986005e14
@@ -258,7 +344,7 @@ def ParseToCSV(input_filepath):
             di_k = ephem['C_is'] * sin2Phi_k + ephem['C_ic'] * cos2Phi_k
 
             u_k = Phi_k + du_k
-
+            
             r_k = A * (1 - ephem['e'] * np.cos(E_k)) + dr_k
 
             i_k = ephem['i_0'] + di_k + ephem['IDOT'] * satell_position['t_k']
@@ -342,6 +428,15 @@ def originalGnssToPosition(input_filepath):
 
     df_filtered = movingAverageFilter(existing_df)
 
+    # Define styles for High_CN0 and Low_CN0
+    high_cn0_style = simplekml.Style()
+    high_cn0_style.iconstyle.color = simplekml.Color.green  # Green for High_CN0
+    high_cn0_style.iconstyle.scale = 1
+
+    low_cn0_style = simplekml.Style()
+    low_cn0_style.iconstyle.color = simplekml.Color.red  # Red for Low_CN0
+    low_cn0_style.iconstyle.scale = 1
+
     # Accumulate coordinates for the LineString
     coordinates = []
 
@@ -350,16 +445,19 @@ def originalGnssToPosition(input_filepath):
         gps_time = row['GPS_Unique_Time']
 
         if 0 < row['Alt'] < 1000:
-
             coordinates.append((row['Lon'], row['Lat'], row['Alt']))
 
             # Create a point place-mark
             pnt = kml.newpoint(name=str(row['GPS_Unique_Time']), coords=[(row['Lon'], row['Lat'], row['Alt'])])
 
+            # Assign style based on the group
+            if row['Group'] == 'High_CN0':
+                pnt.style = high_cn0_style
+            elif row['Group'] == 'Low_CN0':
+                pnt.style = low_cn0_style
+
             # Add time information to the place-mark
             times_in_gps = pd.to_datetime(gps_time)
-            # Debug print to check the altitude before filtering
-            # print(f"Processing row {index}: Alt={row['Alt']} GPSTime:{gps_time}")
             if not pd.isna(times_in_gps):
                 pnt.timestamp.when = times_in_gps.strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -368,13 +466,14 @@ def originalGnssToPosition(input_filepath):
     linestring.coords = coordinates
     linestring.altitudemode = simplekml.AltitudeMode.relativetoground  # Adjust altitude mode as needed
 
-    linestring.style.linestyle.color = simplekml.Color.red  # Change color to red
+    linestring.style.linestyle.color = simplekml.Color.blue  # Change color to blue
     linestring.style.linestyle.width = 3  # Change width if needed
 
     # Specify the path for saving the KML file
     output_kml_path = os.path.join(outcomes_dir, file_name + '.kml')
     # Save the KML file
     kml.save(output_kml_path)
+
 
 
 # Added for mor accuracy creating the kml.
@@ -400,7 +499,7 @@ def movingAverageFilter(df, window_size=5):
 
 
 the_data_gnss_file = "C:\\Users\\בר\\OneDrive\\שולחן העבודה\\מדמח\\שנה ג\\רובוטים " \
-                 "אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\beirut2.txt "
+                 "אוטונומים\\Finish_Project\\GNSS_Navigation_System\\data\\sample\\cairo.txt "
 detector = GNSSDisruptionDetector(the_data_gnss_file, num_satellites=2)
 
 
