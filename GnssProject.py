@@ -53,17 +53,22 @@ def positioningAlgorithmDistrub(csv_file):
 
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
-        df_gps_time_sorted = df_gps_time.sort_values(by='CN0', ascending=False)
+        
+        # Apply scoring to the satellites
+        df_gps_time = score_satellites(df_gps_time)
+        
+        # Sort by the new Satellite_Score instead of CN0
+        df_gps_time_sorted = df_gps_time.sort_values(by='Satellite_Score', ascending=False)
 
         # Split the data into two groups
-        split_the_index = len(df_gps_time_sorted) // 2
-        high_cn0_group = df_gps_time_sorted.iloc[:split_the_index]
-        low_cn0_group = df_gps_time_sorted.iloc[split_the_index:]
+        split_index = len(df_gps_time_sorted) // 2
+        high_score_group = df_gps_time_sorted.iloc[:split_index]
+        low_score_group = df_gps_time_sorted.iloc[split_index:]
 
-        for name_group, data_group in [("High_CN0", high_cn0_group), ("Low_CN0", low_cn0_group)]:
+        for name_group, data_group in [("High_Score", high_score_group), ("Low_Score", low_score_group)]:
             xs = data_group[['Sat.X', 'Sat.Y', 'Sat.Z']].values
             measured_pseudorange = data_group['Pseudo-Range'].values
-            weights = data_group['CN0'].values
+            weights = data_group['Satellite_Score'].values  # Use Satellite_Score as weights
             x_estimate, bias_estimate, norm_dp = weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights)
 
             # Update previous estimates for next iteration
@@ -185,11 +190,41 @@ def calculate_doppler(eph, pos_rcv, time):
 
     return doppler
 
+def score_satellites(df_gps_time):
+    # Normalize CN0 values
+    df_gps_time['CN0_norm'] = (df_gps_time['CN0'] - df_gps_time['CN0'].min()) / (df_gps_time['CN0'].max() - df_gps_time['CN0'].min())
+    
+    # Calculate pseudorange rate (if available)
+    if 'PseudorangeRateMetersPerSecond' in df_gps_time.columns:
+        df_gps_time['PR_rate_norm'] = np.abs(df_gps_time['PseudorangeRateMetersPerSecond'])
+        df_gps_time['PR_rate_norm'] = (df_gps_time['PR_rate_norm'] - df_gps_time['PR_rate_norm'].min()) / (df_gps_time['PR_rate_norm'].max() - df_gps_time['PR_rate_norm'].min())
+    else:
+        df_gps_time['PR_rate_norm'] = 1  # Default value if not available
+    
+    # input_path = os.path.join(outcomes_dir, 'df_gps_time.csv')
+    # df_gps_time.to_csv(input_path, index=False)
+    # exit(1)
+    # Check for expected number of satellites per constellation
+    constellation_counts = df_gps_time['Constellation'].value_counts()
+    expected_counts = {'G': 8, 'R': 6, 'E': 6, 'C': 6}  # Adjust these values based on typical visibility
+    
+    df_gps_time['Constellation_score'] = df_gps_time['Constellation'].map(
+        {const: min(1, count / expected_counts.get(const, 1)) for const, count in constellation_counts.items()}
+    )
+    
+    # Calculate composite score
+    df_gps_time['Satellite_Score'] = (
+        df_gps_time['CN0_norm'] * 0.6 +
+        df_gps_time['PR_rate_norm'] * 0.2 +
+        df_gps_time['Constellation_score'] * 0.2
+    )
+    
+    return df_gps_time
 
 def ParseToCSV(input_filepath):
     filename = os.path.splitext(os.path.basename(input_filepath))[0]
     data = []
-    fields = ['GPS time', 'SatPRN (ID)', 'Sat.X', 'Sat.Y', 'Sat.Z', 'Pseudo-Range', 'CN0']
+    fields = ['GPS time', 'SatPRN (ID)', 'Sat.X', 'Sat.Y', 'Sat.Z', 'Pseudo-Range', 'CN0' , 'PseudorangeRateMetersPerSecond','Constellation']
 
     # Open the CSV file and iterate over its rows
     with open(input_filepath) as csvfile:
@@ -208,6 +243,7 @@ def ParseToCSV(input_filepath):
 
     android_fixes = pd.DataFrame(android_fixes[1:], columns=android_fixes[0])
     measur = pd.DataFrame(measur[1:], columns=measur[0])
+
 
     # Format satellite IDs
     measur.loc[measur['Svid'].str.len() == 1, 'Svid'] = '0' + measur['Svid']
@@ -280,6 +316,10 @@ def ParseToCSV(input_filepath):
     measur['PrSigmaM'] = SPEEDOFLIGHT * 1e-9 * measur['ReceivedSvTimeUncertaintyNanos']
     manager = ephemeris_manager.EphemerisManager(ephemeris_data_dir)
     
+    # input_path = os.path.join(outcomes_dir, 'measur.csv')
+    # measur.to_csv(input_path, index=False)
+    # exit(1)
+
     # Calculate satellite Y,X,Z coordinates
     # loop to go through each timezone of satellites
     for i in range(len(measur['Epoch'].unique())):
@@ -297,12 +337,15 @@ def ParseToCSV(input_filepath):
             one_epoch.set_index('SvName', inplace=True)
             num_sats = len(one_epoch.index)
             epoch += 1
-
+        # input_path = os.path.join(outcomes_dir, 'one_epoch.csv')
+        # one_epoch.to_csv(input_path, index=False)
+        # exit(1)
         if len(one_epoch) >= 2:  # Ensure one_epoch is valid before proceeding
             sats = one_epoch.index.unique().tolist()
             ephemeris = manager.get_ephemeris(times_tamp, sats)
             # input_path = os.path.join(outcomes_dir, 'ephemeris.csv')
             # ephemeris.to_csv(input_path, index=False)
+            # exit(1)
 
         def findSatellitePosition(ephem, transmit_time):
             mu = 3.986005e14
@@ -358,9 +401,14 @@ def ParseToCSV(input_filepath):
             satell_position['x_k'] = x_k_prime * np.cos(Omega_k) - y_k_prime * np.cos(i_k) * np.sin(Omega_k)
             satell_position['y_k'] = x_k_prime * np.sin(Omega_k) + y_k_prime * np.cos(i_k) * np.cos(Omega_k)
             satell_position['z_k'] = y_k_prime * np.sin(i_k)
+            # input_path = os.path.join(outcomes_dir, 'satell_position.csv')
+            # satell_position.to_csv(input_path, index=False)
+            # exit(1)
             return satell_position
 
         sv_position = findSatellitePosition(ephemeris, one_epoch['tTxSeconds'])
+        
+        
 
         Yco = sv_position['y_k'].tolist()
         Xco = sv_position['x_k'].tolist()
@@ -383,13 +431,15 @@ def ParseToCSV(input_filepath):
             num_sats = len(one_epoch.index)
             epoch += 1
 
+        
         CN0 = one_epoch['Cn0DbHz'].tolist()
         pseudo_range = (one_epoch['PrM'] + SPEEDOFLIGHT * sv_position['delT_sv']).to_numpy()
-
+        PrRateMetersPerSecond = (one_epoch['PseudorangeRateMetersPerSecond']).to_numpy()
+        Constellation = (one_epoch['Constellation']).to_numpy()
     # saving all the above data into csv file
         for i in range(len(Yco)):
             gps_time[i] = times_tamp
-            row = [gps_time[i], satPRN[i], Xco[i], Yco[i], Zco[i], pseudo_range[i], CN0[i]]
+            row = [gps_time[i], satPRN[i], Xco[i], Yco[i], Zco[i], pseudo_range[i], CN0[i] , PrRateMetersPerSecond[i] , Constellation[i]]
             data.append(row)
 
     output_csv_path = os.path.join(outcomes_dir, f"{filename}.csv")
@@ -413,10 +463,13 @@ def originalGnssToPosition(input_filepath):
 
     # Open the CSV file
     csv_file = open(input_path, newline='')
+
+    
     if detector.isDistrubt:
         positional_df = positioningAlgorithmDistrub(csv_file)
     else:
         positional_df = positioningAlgorithmUndistrub(csv_file)
+
 
     print("Positional Algo succeeded, creating CSV and KML files.")
     existing_df = pd.read_csv(input_path)
