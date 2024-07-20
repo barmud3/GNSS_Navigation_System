@@ -1,36 +1,69 @@
-# Navigation System Based on Raw GNSS Measurements
+# GNSS Navigation System
 
-## Description
+## Project Overview
 
-This project focuses on developing a sophisticated navigation system that utilizes raw Global Navigation Satellite System (GNSS) measurements. The primary objectives include:
+This GNSS Navigation System is an advanced tool for processing and analyzing Global Navigation Satellite System (GNSS) data. It focuses on distinguishing between real and potentially fake location data using a sophisticated scoring and grouping mechanism.
 
-1. **Real-time Position Editing**: Implementing an efficient and accurate algebraic approach to dynamically adjust and refine real-time positional data.
+## Key Features
 
-2. **Satellite Filtering**: Incorporating the ability to filter satellites based on several criteria, including:
-    - **Constellation**: Filtering satellites by their specific GNSS constellation (e.g., GPS, GLONASS, Galileo, BeiDou).
-    - **Otzana**: Identifying and filtering satellites based on Otzana, a metric related to satellite health and reliability.
-    - **False Satellites**: Detecting and excluding erroneous satellite signals to ensure data accuracy.
+1. **Multi-Constellation Support**: Processes data from various GNSS constellations including GPS (G), GLONASS (R), Galileo (E), and BeiDou (C).
 
-3. **Disruption Handling**: Managing and mitigating disruptions, particularly those identified as "Cairo + Beirut" scenarios, which refer to specific types of interference or anomalies that can affect GNSS signals.
+2. **Data Analysis and Scoring**: 
+   - Sorts data by GPS time and constellation.
+   - Implements a scoring system based on:
+     - CN0 (Carrier-to-Noise density ratio) normalization
+     - Pseudorange rate normalization
+     - Constellation-specific scoring
 
-4. **Disturbance Identification and Management**: Implementing an algorithm to detect disturbances in GNSS signals and effectively address them to maintain the reliability of the navigation data.
+3. **High/Low Score Grouping**: 
+   - For each constellation at a specific GPS time, creates two groups:
+     - High Score Group
+     - Low Score Group
+   - Potentially creates up to 8 groups (2 per constellation) when sufficient satellites are available.
 
-## Review of Other Projects
+4. **KML Output**: 
+   - Generates a KML file for visual representation.
+   - Distinguishes between points representing real and potentially fake locations.
 
-### 1. RTKLIB
-- **Description**: RTKLIB is an open-source program library for standard and precise positioning with GNSS. It provides various positioning modes, including single, differential, RTK, and PPP (Precise Point Positioning).
-- **Highlights**: Known for its versatility and support for a wide range of GNSS data formats and correction sources. RTKLIB is a robust tool but can be complex to configure and use effectively.
+5. **Ephemeris Management**: 
+   - Utilizes `ephemeris_manager.py` for handling ephemeris data across multiple GNSS constellations.
 
-### 2. GPSTk (GPS Toolkit)
-- **Description**: GPSTk is an open-source library that provides a suite of tools for the processing of GNSS data. It is designed for both academic and professional use.
-- **Highlights**: Offers extensive functionality for GNSS data manipulation and analysis. It is highly modular, allowing users to integrate specific functionalities into their applications. However, it may require significant effort to integrate with modern real-time applications.
+## Ephemeris Manager (`ephemeris_manager.py`)
 
-### 3. Google GNSS Logger
-- **Description**: Google GNSS Logger is an Android app designed to log raw GNSS measurements from Android devices.
-- **Highlights**: While primarily a data logging tool, it provides valuable insights into the raw GNSS data available from modern smartphones. It is useful for research and development but lacks built-in advanced processing capabilities.
+The Ephemeris Manager is a crucial component that handles ephemeris data for various GNSS satellite systems. Key functionalities include:
 
-### 4. RTK-GPS
-- **Description**: RTK-GPS is a project aimed at providing precise positioning using Real-Time Kinematic (RTK) processing of GNSS data.
-- **Highlights**: Focuses on achieving high-precision positioning. It is effective for applications requiring centimeter-level accuracy but typically requires a base station setup and may not handle disruptions and false signals as effectively without additional customization.
+- Downloading ephemeris data from NASA and IGS servers
+- Parsing and processing ephemeris files
+- Retrieving ephemeris data for specific satellites at given timestamps
+- Handling leap seconds
 
-This project aims to build on the strengths of these existing projects while addressing specific challenges related to real-time position editing, satellite filtering, and disruption management, ultimately contributing to the advancement of GNSS-based navigation systems.
+### Features:
+- Support for GPS, GLONASS, Galileo, and BeiDou constellations
+- Efficient data retrieval and caching mechanisms
+- Conversion of ephemeris data into usable DataFrame format
+- Leap second management
+
+## How It Works
+
+1. **Data Input**: The system takes raw GNSS data as input.
+2. **Data Processing**: 
+   - Sorts the data by GPS time and constellation.
+   - Calculates scores for each satellite based on multiple factors.
+3. **Grouping**: 
+   - Divides satellites into high and low score groups for each constellation.
+   - Requires a minimum of 4 satellites per constellation for grouping.
+4. **Position Calculation**: 
+   - Uses weighted least squares algorithm for position estimation.
+   - Applies different algorithms for disturbed and undisturbed scenarios.
+5. **Output Generation**:
+   - Creates a CSV file with processed data.
+   - Generates a KML file for visual representation of the trajectory, distinguishing between likely real and fake locations.
+
+## Usage
+
+[Include instructions on how to run the script, required inputs, and how to interpret the outputs]
+
+## Dependencies
+
+- Python 3.x
+- Libraries: pandas, numpy, simplekml, georinex.
