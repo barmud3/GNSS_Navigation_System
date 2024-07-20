@@ -54,12 +54,13 @@ def positioningAlgorithmDistrub(csv_file):
 
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
-        input_path = os.path.join(outcomes_dir, 'df_gps_time.csv')
-        df_gps_time.to_csv(input_path, index=False)
+
+        # Apply scoring to the satellites
+        df_gps_time = score_satellites(df_gps_time)
 
         for constellation in df_gps_time['Constellation'].unique():
             df_constellation = df_gps_time[df_gps_time['Constellation'] == constellation]
-            df_constellation_sorted = df_constellation.sort_values(by='CN0', ascending=False)
+            df_constellation_sorted = df_constellation.sort_values(by='Satellite_Score', ascending=False)
             
             # Split into high and low Satellite_Score groups
             split_index = len(df_constellation_sorted) // 2
@@ -69,7 +70,7 @@ def positioningAlgorithmDistrub(csv_file):
             for name_group, data_group in [("High_Score", high_score_group), ("Low_Score", low_score_group)]:
                 xs = data_group[['Sat.X', 'Sat.Y', 'Sat.Z']].values
                 measured_pseudorange = data_group['Pseudo-Range'].values
-                weights = data_group['CN0'].values
+                weights = data_group['Satellite_Score'].values
                 num_satellites = len(xs)
 
                 if num_satellites < 4:
@@ -121,85 +122,6 @@ def positioningAlgorithmUndistrub(csv_file):
 def convertXYZtoLLA(val):
     return navpy.ecef2lla(val)
 
-def calculate_doppler(eph, pos_rcv, time):
-    # Constants
-    GM = 3.986005e14  # Earth's gravitational constant
-    OMEGA_E = 7.2921151467e-5  # Earth's rotation rate
-
-    # Extract ephemeris parameters
-    sqrtA = eph['sqrtA']
-    e = eph['e']
-    i_0 = eph['i_0']
-    OMEGA_0 = eph['Omega_0']
-    omega = eph['omega']
-    M_0 = eph['M_0']
-    deltaN = eph['deltaN']
-    IDOT = eph['IDOT']
-    OmegaDot = eph['OmegaDot']
-    t_oe = eph['t_oe']
-
-    # Semi-major axis
-    A = sqrtA ** 2
-
-    # Time since reference epoch
-    tk = time - t_oe
-
-    # Corrected mean motion
-    n_0 = np.sqrt(GM / A**3)
-    n = n_0 + deltaN
-
-    # Mean anomaly
-    M = M_0 + n * tk
-
-    # Eccentric anomaly (solve Kepler's equation)
-    E = M
-    for _ in range(10):  # Iterative solution
-        E = M + e * np.sin(E)
-
-    # True anomaly
-    nu = 2 * np.arctan2(np.sqrt(1+e) * np.sin(E/2), np.sqrt(1-e) * np.cos(E/2))
-
-    # Argument of latitude
-    phi = nu + omega
-
-    # Orbital radius
-    r = A * (1 - e * np.cos(E))
-
-    # Positions in orbital plane
-    x_orb = r * np.cos(phi)
-    y_orb = r * np.sin(phi)
-
-    # Corrected longitude of ascending node
-    OMEGA = OMEGA_0 + (OmegaDot - OMEGA_E) * tk - OMEGA_E * t_oe
-
-    # ECEF coordinates
-    x = x_orb * np.cos(OMEGA) - y_orb * np.cos(i_0) * np.sin(OMEGA)
-    y = x_orb * np.sin(OMEGA) + y_orb * np.cos(i_0) * np.cos(OMEGA)
-    z = y_orb * np.sin(i_0)
-
-    # Velocity in orbital plane
-    Edot = n / (1 - e * np.cos(E))
-    xdot_orb = -A * n * np.sin(E) * Edot
-    ydot_orb = A * n * np.sqrt(1 - e**2) * np.cos(E) * Edot
-
-    # ECEF velocity
-    xdot = xdot_orb * np.cos(OMEGA) - ydot_orb * np.cos(i_0) * np.sin(OMEGA) - y * OmegaDot
-    ydot = xdot_orb * np.sin(OMEGA) + ydot_orb * np.cos(i_0) * np.cos(OMEGA) + x * OmegaDot
-    zdot = ydot_orb * np.sin(i_0)
-
-    # Line of sight vector
-    los = np.array([x, y, z]) - pos_rcv
-    los = los / np.linalg.norm(los)
-
-    # Relative velocity
-    v_rel = np.array([xdot, ydot, zdot]) - np.cross(np.array([0, 0, OMEGA_E]), pos_rcv)
-
-    # Doppler shift
-    f_L1 = 1575.42e6  # L1 frequency
-    c = 299792458  # Speed of light
-    doppler = -np.dot(los, v_rel) * f_L1 / c
-
-    return doppler
 
 def score_satellites(df_gps_time):
     # Normalize CN0 values
