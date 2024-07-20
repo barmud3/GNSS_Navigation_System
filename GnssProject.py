@@ -102,8 +102,10 @@ def positioningAlgorithmUndistrub(csv_file):
     df_times = df['GPS time'].unique()
     x0 = np.array([0, 0, 0])
     b0 = 0
+    
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
+        
         df_gps_time_sorted = df_gps_time.sort_values(by='SatPRN (ID)')
         xs = df_gps_time_sorted[['Sat.X', 'Sat.Y', 'Sat.Z']].values
         measured_pseudorange = df_gps_time_sorted['Pseudo-Range'].values
@@ -187,11 +189,16 @@ def ParseToCSV(input_filepath):
     measur['Constellation'] = measur['ConstellationType'].map(constellation_map)
     measur['SvName'] = measur['Constellation'] + measur['Svid']
 
-    measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'E', 'C'])]
+    if(detector.isDistrubt):
+        measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'E', 'C'])]
+    else:
+        measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'C'])]
 
     # Convert columns to numeric representation
     numeric_columns = ['Cn0DbHz', 'TimeNanos', 'FullBiasNanos', 'ReceivedSvTimeNanos', 
                        'PseudorangeRateMetersPerSecond', 'ReceivedSvTimeUncertaintyNanos']
+    
+
     for col in numeric_columns:
         measur[col] = pd.to_numeric(measur[col])
 
@@ -201,6 +208,11 @@ def ParseToCSV(input_filepath):
             measur[col] = pd.to_numeric(measur[col])
         else:
             measur[col] = 0
+
+    # Filter by C/N0 (Carrier-to-Noise Density Ratio)
+    if not detector.isDistrubt:  # Make sure 'detector' is defined and accessible
+        min_cn0_threshold = 30  # CN0 threshold
+        measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
 
     # Calculate GPS time
     measur['GpsTimeNanos'] = measur['TimeNanos'] - (measur['FullBiasNanos'] - measur['BiasNanos'])
