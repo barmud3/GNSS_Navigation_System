@@ -8,6 +8,7 @@ import simplekml
 import subprocess
 from analyzeDist import GNSSDisruptionDetector
 import warnings
+from numpy.linalg import inv, norm, LinAlgError
 
 SPEEDOFLIGHT = 2.99792458e8
 ephemeris_data_dir = os.path.join('data')
@@ -53,34 +54,44 @@ def positioningAlgorithmDistrub(csv_file):
 
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
-        
-        # Apply scoring to the satellites
-        df_gps_time = score_satellites(df_gps_time)
-        
-        # Sort by the new Satellite_Score instead of CN0
-        df_gps_time_sorted = df_gps_time.sort_values(by='Satellite_Score', ascending=False)
+        input_path = os.path.join(outcomes_dir, 'df_gps_time.csv')
+        df_gps_time.to_csv(input_path, index=False)
 
-        # Split the data into two groups
-        split_index = len(df_gps_time_sorted) // 2
-        high_score_group = df_gps_time_sorted.iloc[:split_index]
-        low_score_group = df_gps_time_sorted.iloc[split_index:]
+        for constellation in df_gps_time['Constellation'].unique():
+            df_constellation = df_gps_time[df_gps_time['Constellation'] == constellation]
+            df_constellation_sorted = df_constellation.sort_values(by='CN0', ascending=False)
+            
+            # Split into high and low Satellite_Score groups
+            split_index = len(df_constellation_sorted) // 2
+            high_score_group = df_constellation_sorted.iloc[:split_index]
+            low_score_group = df_constellation_sorted.iloc[split_index:]
 
-        for name_group, data_group in [("High_Score", high_score_group), ("Low_Score", low_score_group)]:
-            xs = data_group[['Sat.X', 'Sat.Y', 'Sat.Z']].values
-            measured_pseudorange = data_group['Pseudo-Range'].values
-            weights = data_group['Satellite_Score'].values  # Use Satellite_Score as weights
-            x_estimate, bias_estimate, norm_dp = weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights)
+            for name_group, data_group in [("High_Score", high_score_group), ("Low_Score", low_score_group)]:
+                xs = data_group[['Sat.X', 'Sat.Y', 'Sat.Z']].values
+                measured_pseudorange = data_group['Pseudo-Range'].values
+                weights = data_group['CN0'].values
+                num_satellites = len(xs)
 
-            # Update previous estimates for next iteration
-            x0 = x_estimate
-            b0 = bias_estimate
+                if num_satellites < 4:
+                    print(f"Skipping group {name_group} due to insufficient satellites (need at least 4, got {num_satellites})")
+                    continue
 
-            lla = convertXYZtoLLA(x_estimate)
-            data.append([time, name_group, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
+                try:
+                    x_estimate, bias_estimate, norm_dp = weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights)
+                    x0 = x_estimate
+                    b0 = bias_estimate
+                    lla = convertXYZtoLLA(x_estimate)
+                    
+                    # Append data without including Constellation
+                    data.append([time, name_group, num_satellites, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
+                except Exception as e:
+                    print(f"Error in group {name_group}:{str(e)} ")
+                
+                counter += 1
 
-        counter += 1
-
-    df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Group", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
+    # Create DataFrame without Constellation column
+    df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Group", "Num_Satellites", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
+    
     return df_ans
 
 
@@ -201,10 +212,7 @@ def score_satellites(df_gps_time):
     else:
         df_gps_time['PR_rate_norm'] = 1  # Default value if not available
     
-    # input_path = os.path.join(outcomes_dir, 'df_gps_time.csv')
-    # df_gps_time.to_csv(input_path, index=False)
-    # exit(1)
-    # Check for expected number of satellites per constellation
+
     constellation_counts = df_gps_time['Constellation'].value_counts()
     expected_counts = {'G': 8, 'R': 6, 'E': 6, 'C': 6}  # Adjust these values based on typical visibility
     
@@ -224,11 +232,13 @@ def score_satellites(df_gps_time):
 def ParseToCSV(input_filepath):
     filename = os.path.splitext(os.path.basename(input_filepath))[0]
     data = []
-    fields = ['GPS time', 'SatPRN (ID)', 'Sat.X', 'Sat.Y', 'Sat.Z', 'Pseudo-Range', 'CN0' , 'PseudorangeRateMetersPerSecond','Constellation']
+    fields = ['GPS time', 'SatPRN (ID)', 'Sat.X', 'Sat.Y', 'Sat.Z', 'Pseudo-Range', 'CN0', 'PseudorangeRateMetersPerSecond', 'Constellation']
 
     # Open the CSV file and iterate over its rows
     with open(input_filepath) as csvfile:
         reader = csv.reader(csvfile)
+        android_fixes = []
+        measur = []
         for row in reader:
             if row[0][0] == '#':
                 if 'Fix' in row[0]:
@@ -244,251 +254,189 @@ def ParseToCSV(input_filepath):
     android_fixes = pd.DataFrame(android_fixes[1:], columns=android_fixes[0])
     measur = pd.DataFrame(measur[1:], columns=measur[0])
 
-
     # Format satellite IDs
     measur.loc[measur['Svid'].str.len() == 1, 'Svid'] = '0' + measur['Svid']
     constellation_map = {
-    '1': 'G',  # GPS
-    '3': 'R',  # GLONASS
-    '5': 'C',  # BeiDou
-    '6': 'E'   # Galileo
+        '1': 'G',  # GPS
+        '3': 'R',  # GLONASS
+        '5': 'C',  # BeiDou
+        '6': 'E'   # Galileo
     }
     measur['Constellation'] = measur['ConstellationType'].map(constellation_map)
     measur['SvName'] = measur['Constellation'] + measur['Svid']
 
-
     measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'E', 'C'])]
-    
-    # Extract SatPRN (ID) from the data
-    satPRN = measur['SvName'].tolist()
-    uniqSatPRN = measur['SvName'].unique().tolist()
 
     # Convert columns to numeric representation
+    numeric_columns = ['Cn0DbHz', 'TimeNanos', 'FullBiasNanos', 'ReceivedSvTimeNanos', 
+                       'PseudorangeRateMetersPerSecond', 'ReceivedSvTimeUncertaintyNanos']
+    for col in numeric_columns:
+        measur[col] = pd.to_numeric(measur[col])
 
-    # Filter by C/N0 (Carrier-to-Noise Density Ratio)
-    measur['Cn0DbHz'] = pd.to_numeric(measur['Cn0DbHz'])  # Ensure Cn0DbHz column is numeric
-    # if(detector.isDistrubt == False):
-    #     min_cn0_threshold = 25  # CN0 threshold
-    #     measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
+    # Handle optional columns
+    for col in ['BiasNanos', 'TimeOffsetNanos']:
+        if col in measur.columns:
+            measur[col] = pd.to_numeric(measur[col])
+        else:
+            measur[col] = 0
 
-    measur['TimeNanos'] = pd.to_numeric(measur['TimeNanos'])
-    measur['FullBiasNanos'] = pd.to_numeric(measur['FullBiasNanos'])
-    measur['ReceivedSvTimeNanos'] = pd.to_numeric(measur['ReceivedSvTimeNanos'])
-    measur['PseudorangeRateMetersPerSecond'] = pd.to_numeric(measur['PseudorangeRateMetersPerSecond'])
-    measur['ReceivedSvTimeUncertaintyNanos'] = pd.to_numeric(measur['ReceivedSvTimeUncertaintyNanos'])
-
-    # A few measurement values are not provided by all phones
-    # We'll check for them and initialize them with zeros if missing
-    if 'BiasNanos' in measur.columns:
-        measur['BiasNanos'] = pd.to_numeric(measur['BiasNanos'])
-    else:
-        measur['BiasNanos'] = 0
-    if 'TimeOffsetNanos' in measur.columns:
-        measur['TimeOffsetNanos'] = pd.to_numeric(measur['TimeOffsetNanos'])
-    else:
-        measur['TimeOffsetNanos'] = 0
-
-    measur['GpsTimeNanos'] = measur['TimeNanos'] - (
-                measur['FullBiasNanos'] - measur['BiasNanos'])
+    # Calculate GPS time
+    measur['GpsTimeNanos'] = measur['TimeNanos'] - (measur['FullBiasNanos'] - measur['BiasNanos'])
     gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
     measur['UnixTime'] = pd.to_datetime(measur['GpsTimeNanos'], utc=True, origin=gps_epoch)
-    measur['UnixTime'] = measur['UnixTime']
 
     # Split data into measurement epochs
-    measur['Epoch'] = 0
-    measur.loc[
-        measur['UnixTime'] - measur['UnixTime'].shift() > timedelta(milliseconds=200), 'Epoch'] = 1
-    measur['Epoch'] = measur['Epoch'].cumsum()
+    measur['Epoch'] = (measur['UnixTime'] - measur['UnixTime'].shift() > timedelta(milliseconds=200)).cumsum()
 
-    # Extract GPS time from the data
-    gps_time = measur['UnixTime'].tolist()
-
-    # Calculate pseudorange in seconds
+    # Calculate pseudorange
     WEEKSEC = 604800
     measur['tRxGnssNanos'] = measur['TimeNanos'] + measur['TimeOffsetNanos'] - (measur['FullBiasNanos'].iloc[0] + measur['BiasNanos'].iloc[0])
     measur['GpsWeekNumber'] = np.floor(1e-9 * measur['tRxGnssNanos'] / WEEKSEC)
-    measur['tRxSeconds'] = 1e-9*measur['tRxGnssNanos'] - WEEKSEC * measur['GpsWeekNumber']
-    measur['tTxSeconds'] = 1e-9*(measur['ReceivedSvTimeNanos'] + measur['TimeOffsetNanos'])
+    measur['tRxSeconds'] = 1e-9 * measur['tRxGnssNanos'] - WEEKSEC * measur['GpsWeekNumber']
+    measur['tTxSeconds'] = 1e-9 * (measur['ReceivedSvTimeNanos'] + measur['TimeOffsetNanos'])
     measur['prSeconds'] = measur['tRxSeconds'] - measur['tTxSeconds']
-
-    # Convert to meters
     measur['PrM'] = SPEEDOFLIGHT * measur['prSeconds']
     measur['PrSigmaM'] = SPEEDOFLIGHT * 1e-9 * measur['ReceivedSvTimeUncertaintyNanos']
+
     manager = ephemeris_manager.EphemerisManager(ephemeris_data_dir)
-    
-    # input_path = os.path.join(outcomes_dir, 'measur.csv')
-    # measur.to_csv(input_path, index=False)
-    # exit(1)
 
-    # Calculate satellite Y,X,Z coordinates
-    # loop to go through each timezone of satellites
-    for i in range(len(measur['Epoch'].unique())):
-        epoch = i
-        num_sats = 0
-        while num_sats < 5:
-            one_epoch = measur.loc[
-                (measur['Epoch'] == epoch) & (measur['prSeconds'] < 0.1)].drop_duplicates(subset='SvName')
+    def findSatellitePosition(ephem, transmit_time):
+        mu = 3.986005e14
+        OmegaDot_e = 7.2921151467e-5
+        F = -4.442807633e-10
+        
+        satell_position = pd.DataFrame(index=ephem.index)
+        satell_position['t_k'] = transmit_time - ephem['t_oe']
+        A = ephem['sqrtA'].pow(2)
+        n_0 = np.sqrt(mu / A.pow(3))
+        n = n_0 + ephem['deltaN']
+        M_k = ephem['M_0'] + n * satell_position['t_k']
+        E_k = M_k
+        
+        for _ in range(10):
+            new_E_k = M_k + ephem['e'] * np.sin(E_k)
+            if (np.abs(new_E_k - E_k) < 1e-8).all():
+                break
+            E_k = new_E_k
 
-            if len(one_epoch) < 2:  # Check if there are at least 2 rows
-                epoch += 1
-                continue
+        sinE_k, cosE_k = np.sin(E_k), np.cos(E_k)
+        v_k = np.arctan2(np.sqrt(1 - ephem['e'].pow(2)) * sinE_k, (cosE_k - ephem['e']))
+        Phi_k = v_k + ephem['omega']
+        sin2Phi_k, cos2Phi_k = np.sin(2 * Phi_k), np.cos(2 * Phi_k)
 
-            times_tamp = one_epoch.iloc[1]['UnixTime'].to_pydatetime(warn=False)
-            one_epoch.set_index('SvName', inplace=True)
-            num_sats = len(one_epoch.index)
-            epoch += 1
-        # input_path = os.path.join(outcomes_dir, 'one_epoch.csv')
-        # one_epoch.to_csv(input_path, index=False)
-        # exit(1)
-        if len(one_epoch) >= 2:  # Ensure one_epoch is valid before proceeding
-            sats = one_epoch.index.unique().tolist()
-            ephemeris = manager.get_ephemeris(times_tamp, sats)
-            # input_path = os.path.join(outcomes_dir, 'ephemeris.csv')
-            # ephemeris.to_csv(input_path, index=False)
-            # exit(1)
+        du_k = ephem['C_us'] * sin2Phi_k + ephem['C_uc'] * cos2Phi_k
+        dr_k = ephem['C_rs'] * sin2Phi_k + ephem['C_rc'] * cos2Phi_k
+        di_k = ephem['C_is'] * sin2Phi_k + ephem['C_ic'] * cos2Phi_k
 
-        def findSatellitePosition(ephem, transmit_time):
-            mu = 3.986005e14
-            OmegaDot_e = 7.2921151467e-5
-            F = -4.442807633e-10
-            satell_position = pd.DataFrame()
-            satell_position['sv'] = ephem.index
-            satell_position.set_index('sv', inplace=True)
-            satell_position['t_k'] = transmit_time - ephem['t_oe']
-            A = ephem['sqrtA'].pow(2)
-            n_0 = np.sqrt(mu / A.pow(3))
-            n = n_0 + ephem['deltaN']
-            M_k = ephem['M_0'] + n * satell_position['t_k']
-            E_k = M_k
-            err = pd.Series(data=[1] * len(satell_position.index))
-            i = 0
-            while err.abs().min() > 1e-8 and i < 10:
-                new_vals = M_k + ephem['e'] * np.sin(E_k)
-                err = new_vals - E_k
-                E_k = new_vals
-                i += 1
+        u_k = Phi_k + du_k
+        r_k = A * (1 - ephem['e'] * np.cos(E_k)) + dr_k
+        i_k = ephem['i_0'] + di_k + ephem['IDOT'] * satell_position['t_k']
 
-            sinE_k = np.sin(E_k)
-            cosE_k = np.cos(E_k)
-            delT_r = F * ephem['e'].pow(ephem['sqrtA']) * sinE_k
-            delT_oc = transmit_time - ephem['t_oc']
-            satell_position['delT_sv'] = ephem['SVclockBias'] + ephem['SVclockDrift'] * delT_oc + ephem[
-                'SVclockDriftRate'] * delT_oc.pow(2)
+        x_k_prime = r_k * np.cos(u_k)
+        y_k_prime = r_k * np.sin(u_k)
 
-            v_k = np.arctan2(np.sqrt(1 - ephem['e'].pow(2)) * sinE_k, (cosE_k - ephem['e']))
+        Omega_k = ephem['Omega_0'] + (ephem['OmegaDot'] - OmegaDot_e) * satell_position['t_k'] - OmegaDot_e * ephem['t_oe']
+        
+        satell_position['x_k'] = x_k_prime * np.cos(Omega_k) - y_k_prime * np.cos(i_k) * np.sin(Omega_k)
+        satell_position['y_k'] = x_k_prime * np.sin(Omega_k) + y_k_prime * np.cos(i_k) * np.cos(Omega_k)
+        satell_position['z_k'] = y_k_prime * np.sin(i_k)
+        
+        delT_r = F * ephem['e'] * ephem['sqrtA'] * sinE_k
+        delT_oc = transmit_time - ephem['t_oc']
+        satell_position['delT_sv'] = ephem['SVclockBias'] + ephem['SVclockDrift'] * delT_oc + ephem['SVclockDriftRate'] * delT_oc.pow(2) + delT_r
+        
+        return satell_position
 
-            Phi_k = v_k + ephem['omega']
+    # Process each epoch
+    for epoch in measur['Epoch'].unique():
+        one_epoch = measur.loc[
+            (measur['Epoch'] == epoch) & (measur['prSeconds'] < 0.1)
+        ].drop_duplicates(subset='SvName')
 
-            sin2Phi_k = np.sin(2 * Phi_k)
-            cos2Phi_k = np.cos(2 * Phi_k)
+        if len(one_epoch) < 5:
+            continue
 
-            du_k = ephem['C_us'] * sin2Phi_k + ephem['C_uc'] * cos2Phi_k
-            dr_k = ephem['C_rs'] * sin2Phi_k + ephem['C_rc'] * cos2Phi_k
-            di_k = ephem['C_is'] * sin2Phi_k + ephem['C_ic'] * cos2Phi_k
-
-            u_k = Phi_k + du_k
-            
-            r_k = A * (1 - ephem['e'] * np.cos(E_k)) + dr_k
-
-            i_k = ephem['i_0'] + di_k + ephem['IDOT'] * satell_position['t_k']
-
-            x_k_prime = r_k * np.cos(u_k)
-            y_k_prime = r_k * np.sin(u_k)
-
-            Omega_k = ephem['Omega_0'] + (ephem['OmegaDot'] - OmegaDot_e) * satell_position['t_k'] - OmegaDot_e * \
-                      ephem['t_oe']
-
-            satell_position['x_k'] = x_k_prime * np.cos(Omega_k) - y_k_prime * np.cos(i_k) * np.sin(Omega_k)
-            satell_position['y_k'] = x_k_prime * np.sin(Omega_k) + y_k_prime * np.cos(i_k) * np.cos(Omega_k)
-            satell_position['z_k'] = y_k_prime * np.sin(i_k)
-            # input_path = os.path.join(outcomes_dir, 'satell_position.csv')
-            # satell_position.to_csv(input_path, index=False)
-            # exit(1)
-            return satell_position
+        times_tamp = one_epoch.iloc[0]['UnixTime'].to_pydatetime(warn=False)
+        one_epoch.set_index('SvName', inplace=True)
+        sats = one_epoch.index.unique().tolist()
+        ephemeris = manager.get_ephemeris(times_tamp, sats)
 
         sv_position = findSatellitePosition(ephemeris, one_epoch['tTxSeconds'])
-        
-        
 
-        Yco = sv_position['y_k'].tolist()
-        Xco = sv_position['x_k'].tolist()
-        Zco = sv_position['z_k'].tolist()
+        # Ensure alignment by using the same index
+        aligned_data = pd.concat([
+            one_epoch,
+            sv_position[['x_k', 'y_k', 'z_k', 'delT_sv']]
+        ], axis=1, join='inner')
 
-        # Calculate CN0 values
-        epoch = i
-        num_sats = 0
-        while num_sats < 5:
-            one_epoch = measur.loc[
-                (measur['Epoch'] == epoch) & (measur['prSeconds'] < 0.1)].drop_duplicates(subset='SvName')
+        # Calculate pseudo_range with aligned data
+        aligned_data['pseudo_range'] = aligned_data['PrM'] + SPEEDOFLIGHT * aligned_data['delT_sv']
 
-            # Check if one_epoch is empty
-            if one_epoch.empty:
-                epoch += 1
-                continue
+        # Append aligned data to the output list
+        for _, row in aligned_data.iterrows():
+            data.append([
+                times_tamp,
+                row.name,  # SvName (satPRN)
+                row['x_k'],
+                row['y_k'],
+                row['z_k'],
+                row['pseudo_range'],
+                row['Cn0DbHz'],
+                row['PseudorangeRateMetersPerSecond'],
+                row.name[0]  # Constellation (first character of SvName)
+            ])
 
-            times_tamp = one_epoch.iloc[0]['UnixTime'].to_pydatetime(warn=False)
-            one_epoch.set_index('SvName', inplace=True)
-            num_sats = len(one_epoch.index)
-            epoch += 1
-
-        
-        CN0 = one_epoch['Cn0DbHz'].tolist()
-        pseudo_range = (one_epoch['PrM'] + SPEEDOFLIGHT * sv_position['delT_sv']).to_numpy()
-        PrRateMetersPerSecond = (one_epoch['PseudorangeRateMetersPerSecond']).to_numpy()
-        Constellation = (one_epoch['Constellation']).to_numpy()
-    # saving all the above data into csv file
-        for i in range(len(Yco)):
-            gps_time[i] = times_tamp
-            row = [gps_time[i], satPRN[i], Xco[i], Yco[i], Zco[i], pseudo_range[i], CN0[i] , PrRateMetersPerSecond[i] , Constellation[i]]
-            data.append(row)
-
-    output_csv_path = os.path.join(outcomes_dir, f"{filename}.csv")
     # Write data to CSV file
+    output_csv_path = os.path.join(outcomes_dir, f"{filename}.csv")
     with open(output_csv_path, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-
-        # Write the header
         writer.writerow(fields)
-
-        # Write the data
         writer.writerows(data)
-    return
+
+    return output_csv_path
 
 
 def originalGnssToPosition(input_filepath):
     ParseToCSV(input_filepath)
     file_name = os.path.splitext(os.path.basename(input_filepath))[0]
-
     input_path = os.path.join(outcomes_dir, file_name + '.csv')
 
-    # Open the CSV file
-    csv_file = open(input_path, newline='')
-
-    
     if detector.isDistrubt:
-        positional_df = positioningAlgorithmDistrub(csv_file)
+        positional_df = positioningAlgorithmDistrub(input_path)
     else:
-        positional_df = positioningAlgorithmUndistrub(csv_file)
-
+        positional_df = positioningAlgorithmUndistrub(input_path)
 
     print("Positional Algo succeeded, creating CSV and KML files.")
     existing_df = pd.read_csv(input_path)
     existing_df = pd.concat([existing_df, positional_df], axis=1)
     existing_df.to_csv(input_path, index=False)
 
-    # Create a KML object
     kml = simplekml.Kml()
-
     df_filtered = movingAverageFilter(existing_df)
 
-    # Define styles for High_CN0 and Low_CN0
-    high_cn0_style = simplekml.Style()
-    high_cn0_style.iconstyle.color = simplekml.Color.green  # Green for High_CN0
-    high_cn0_style.iconstyle.scale = 1
+    # Define styles for each constellation group
+    styles = {
+        "G_High_Score": simplekml.Style(),
+        "G_Low_Score": simplekml.Style(),
+        "E_High_Score": simplekml.Style(),
+        "E_Low_Score": simplekml.Style(),
+        "R_High_Score": simplekml.Style(),
+        "R_Low_Score": simplekml.Style(),
+        "C_High_Score": simplekml.Style(),
+        "C_Low_Score": simplekml.Style(),
+    }
 
-    low_cn0_style = simplekml.Style()
-    low_cn0_style.iconstyle.color = simplekml.Color.red  # Red for Low_CN0
-    low_cn0_style.iconstyle.scale = 1
+    styles["G_High_Score"].iconstyle.color = simplekml.Color.green
+    styles["G_Low_Score"].iconstyle.color = simplekml.Color.red
+    styles["E_High_Score"].iconstyle.color = simplekml.Color.blue
+    styles["E_Low_Score"].iconstyle.color = simplekml.Color.orange
+    styles["R_High_Score"].iconstyle.color = simplekml.Color.purple
+    styles["R_Low_Score"].iconstyle.color = simplekml.Color.yellow
+    styles["C_High_Score"].iconstyle.color = simplekml.Color.cyan
+    styles["C_Low_Score"].iconstyle.color = simplekml.Color.magenta
+
+    for key in styles.keys():
+        styles[key].iconstyle.scale = 1
 
     # Accumulate coordinates for the LineString
     coordinates = []
@@ -503,11 +451,11 @@ def originalGnssToPosition(input_filepath):
             # Create a point place-mark
             pnt = kml.newpoint(name=str(row['GPS_Unique_Time']), coords=[(row['Lon'], row['Lat'], row['Alt'])])
 
-            # Assign style based on the group
-            if row['Group'] == 'High_CN0':
-                pnt.style = high_cn0_style
-            elif row['Group'] == 'Low_CN0':
-                pnt.style = low_cn0_style
+            # Determine the style based on constellation and group
+            if(detector.isDistrubt) :
+                style_key = f"{row['Constellation']}_{row['Group']}"
+                if style_key in styles:
+                    pnt.style = styles[style_key]
 
             # Add time information to the place-mark
             times_in_gps = pd.to_datetime(gps_time)
