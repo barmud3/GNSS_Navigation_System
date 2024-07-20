@@ -61,7 +61,30 @@ The Ephemeris Manager is a crucial component that handles ephemeris data for var
 
 ## Usage
 
-[Include instructions on how to run the script, required inputs, and how to interpret the outputs]
+Go to folder data -> sample -> add your own gnss raw data file (txt file).
+In GnssProject at varible `the_data_gnss_file` change cairo.txt to the file name you add at sample folder.
+run python GnssProject.py
+
+## Given Data
+
+at folder data -> sample : 
+cairo.txt : distrub gnss data
+Driving.txt , Fixed.txt , Walking.txt : undistrub gnss data
+
+## Examples
+### cairo.txt
+cairo.kml:
+![image](https://github.com/user-attachments/assets/d9de18a4-1666-4936-9377-dcafddaad23e)
+cairo.csv:
+![image](https://github.com/user-attachments/assets/9565e98c-aceb-4e30-b8e1-eb2f0424a8c5)
+
+### Driving.txt
+driving.kml:
+![image](https://github.com/user-attachments/assets/9ac5812f-4f2c-44db-ad87-d19b0d1fa308)
+driving.csv:
+![image](https://github.com/user-attachments/assets/e3f19bbe-e694-46d0-991a-8a9e08321d45)
+
+
 
 ## Dependencies
 
