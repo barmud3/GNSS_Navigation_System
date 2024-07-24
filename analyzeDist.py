@@ -70,9 +70,9 @@ class GNSSDisruptionDetector:
             lon_threshold = 500  # Increase or decrease as needed
             alt_threshold = 500  # Increase or decrease as needed
 
-            print(f"Latitude Difference: {lat_diff}, Threshold: {lat_threshold}")
-            print(f"Longitude Difference: {lon_diff}, Threshold: {lon_threshold}")
-            print(f"Altitude Difference: {alt_diff}, Threshold: {alt_threshold}")
+            # print(f"Latitude Difference: {lat_diff}, Threshold: {lat_threshold}")
+            # print(f"Longitude Difference: {lon_diff}, Threshold: {lon_threshold}")
+            # print(f"Altitude Difference: {alt_diff}, Threshold: {alt_threshold}")
 
             # Check if differences exceed thresholds
             if lat_diff > lat_threshold or lon_diff > lon_threshold or alt_diff > alt_threshold:

@@ -21,43 +21,61 @@ os.makedirs(gnss_samples_dir, exist_ok=True)
 os.makedirs(outcomes_dir, exist_ok=True)
 
 
-def weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights):
+def weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights, max_iterations=50):
+    # Check for consistent lengths
+    if not (len(xs) == len(measured_pseudorange) == len(weights)):
+        raise ValueError("xs, measured_pseudorange, and weights must have the same length")
+    
+    if len(xs) < 4:
+        raise ValueError("At least 4 satellites are required for a solution")
+
     dX = 100 * np.ones(3)
     b = b0
     G = np.ones((measured_pseudorange.size, 4))
+    iteration = 0
 
-    while np.linalg.norm(dX) > 1e-3:
+    while np.linalg.norm(dX) > 1e-3 and iteration < max_iterations:
         r = np.linalg.norm(xs - x0, axis=1)
         phat = r + b0
         delta_p = measured_pseudorange - phat
         W = np.diag(weights)  # Weight matrix
         G[:, 0:3] = -(xs - x0) / r[:, None]
 
-        # Weighted least squares solution
-        solution = np.linalg.inv(G.T @ W @ G) @ G.T @ W @ delta_p
-        dX = solution[0:3]
-        dB = solution[3]
-        x0 = x0 + dX
-        b0 = b0 + dB
+        try:
+            # Use pseudo-inverse for more stable matrix inversion
+            solution = np.linalg.pinv(G.T @ W @ G) @ G.T @ W @ delta_p
+            dX = solution[0:3]
+            dB = solution[3]
+            x0 = x0 + dX
+            b0 = b0 + dB
+        except np.linalg.LinAlgError:
+            print("Matrix inversion failed. The system might be ill-conditioned.")
+            break
+
+        iteration += 1
+
+    if iteration == max_iterations:
+        print(f"Warning: Maximum iterations ({max_iterations}) reached without convergence.")
 
     norm_dp = np.linalg.norm(delta_p)
     return x0, b0, norm_dp
 
 
 def positioningAlgorithmDistrub(csv_file):
+    
     df = pd.read_csv(csv_file)
     data = []
     df_times = df['GPS time'].unique()
     x0 = np.array([0, 0, 0])
     b0 = 0
     counter = 0
+    
 
     for time in df_times:
         df_gps_time = df[df['GPS time'] == time]
 
         # Apply scoring to the satellites
         df_gps_time = score_satellites(df_gps_time)
-
         for constellation in df_gps_time['Constellation'].unique():
             df_constellation = df_gps_time[df_gps_time['Constellation'] == constellation]
             df_constellation_sorted = df_constellation.sort_values(by='Satellite_Score', ascending=False)
@@ -66,32 +84,35 @@ def positioningAlgorithmDistrub(csv_file):
             split_index = len(df_constellation_sorted) // 2
             high_score_group = df_constellation_sorted.iloc[:split_index]
             low_score_group = df_constellation_sorted.iloc[split_index:]
-
+            
             for name_group, data_group in [("High_Score", high_score_group), ("Low_Score", low_score_group)]:
                 xs = data_group[['Sat.X', 'Sat.Y', 'Sat.Z']].values
                 measured_pseudorange = data_group['Pseudo-Range'].values
                 weights = data_group['Satellite_Score'].values
                 num_satellites = len(xs)
-
                 if num_satellites < 4:
                     print(f"Skipping group {name_group} due to insufficient satellites (need at least 4, got {num_satellites})")
                     continue
-
+                
                 try:
                     x_estimate, bias_estimate, norm_dp = weightedLeastSquares(xs, measured_pseudorange, x0, b0, weights)
+                    
+                    if np.any(np.isnan(x_estimate)) or np.any(np.isinf(x_estimate)):
+                        raise ValueError("Invalid solution: NaN or Inf values in the estimate")
+                    
                     x0 = x_estimate
                     b0 = bias_estimate
                     lla = convertXYZtoLLA(x_estimate)
                     
-                    # Append data without including Constellation
-                    data.append([time, name_group, num_satellites, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
+                    # Append data including Constellation
+                    data.append([time, constellation, name_group, num_satellites, x_estimate[0], x_estimate[1], x_estimate[2], lla[0], lla[1], lla[2]])
                 except Exception as e:
-                    print(f"Error in group {name_group}:{str(e)} ")
+                    print(f"Error in group {name_group} for constellation {constellation}: {str(e)}")
                 
                 counter += 1
 
-    # Create DataFrame without Constellation column
-    df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Group", "Num_Satellites", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
+    # Create DataFrame with Constellation column
+    df_ans = pd.DataFrame(data, columns=["GPS_Unique_Time", "Constellation", "Group", "Num_Satellites", "Pos_X", "Pos_Y", "Pos_Z", "Lat", "Lon", "Alt"])
     
     return df_ans
 
@@ -189,6 +210,7 @@ def ParseToCSV(input_filepath):
     measur['Constellation'] = measur['ConstellationType'].map(constellation_map)
     measur['SvName'] = measur['Constellation'] + measur['Svid']
 
+
     if(detector.isDistrubt):
         measur = measur.loc[measur['Constellation'].isin(['G', 'R', 'E', 'C'])]
     else:
@@ -213,7 +235,7 @@ def ParseToCSV(input_filepath):
     if not detector.isDistrubt:  # Make sure 'detector' is defined and accessible
         min_cn0_threshold = 30  # CN0 threshold
         measur = measur[measur['Cn0DbHz'] >= min_cn0_threshold]
-
+    
     # Calculate GPS time
     measur['GpsTimeNanos'] = measur['TimeNanos'] - (measur['FullBiasNanos'] - measur['BiasNanos'])
     gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
@@ -231,6 +253,7 @@ def ParseToCSV(input_filepath):
     measur['prSeconds'] = measur['tRxSeconds'] - measur['tTxSeconds']
     measur['PrM'] = SPEEDOFLIGHT * measur['prSeconds']
     measur['PrSigmaM'] = SPEEDOFLIGHT * 1e-9 * measur['ReceivedSvTimeUncertaintyNanos']
+    
 
     manager = ephemeris_manager.EphemerisManager(ephemeris_data_dir)
 
@@ -281,15 +304,16 @@ def ParseToCSV(input_filepath):
         
         return satell_position
 
+
     # Process each epoch
     for epoch in measur['Epoch'].unique():
         one_epoch = measur.loc[
             (measur['Epoch'] == epoch) & (measur['prSeconds'] < 0.1)
         ].drop_duplicates(subset='SvName')
-
+        
         if len(one_epoch) < 5:
             continue
-
+        
         times_tamp = one_epoch.iloc[0]['UnixTime'].to_pydatetime(warn=False)
         one_epoch.set_index('SvName', inplace=True)
         sats = one_epoch.index.unique().tolist()
@@ -319,7 +343,8 @@ def ParseToCSV(input_filepath):
                 row['PseudorangeRateMetersPerSecond'],
                 row.name[0]  # Constellation (first character of SvName)
             ])
-
+        
+    
     # Write data to CSV file
     output_csv_path = os.path.join(outcomes_dir, f"{filename}.csv")
     with open(output_csv_path, 'w', newline='') as csvfile:
@@ -339,8 +364,8 @@ def originalGnssToPosition(input_filepath):
         positional_df = positioningAlgorithmDistrub(input_path)
     else:
         positional_df = positioningAlgorithmUndistrub(input_path)
-
-    print("Positional Algo succeeded, creating CSV and KML files.")
+    
+    print("Creating CSV and KML files.")
     existing_df = pd.read_csv(input_path)
     existing_df = pd.concat([existing_df, positional_df], axis=1)
     existing_df.to_csv(input_path, index=False)
@@ -374,14 +399,14 @@ def originalGnssToPosition(input_filepath):
 
     # Accumulate coordinates for the LineString
     coordinates = []
-
+    isGood = False
     # Iterate over the data
     for index, row in df_filtered.iterrows():
         gps_time = row['GPS_Unique_Time']
 
         if 0 < row['Alt'] < 1000:
             coordinates.append((row['Lon'], row['Lat'], row['Alt']))
-
+            isGood = True
             # Create a point place-mark
             pnt = kml.newpoint(name=str(row['GPS_Unique_Time']), coords=[(row['Lon'], row['Lat'], row['Alt'])])
 
@@ -395,7 +420,10 @@ def originalGnssToPosition(input_filepath):
             times_in_gps = pd.to_datetime(gps_time)
             if not pd.isna(times_in_gps):
                 pnt.timestamp.when = times_in_gps.strftime('%Y-%m-%dT%H:%M:%SZ')
-
+    if(isGood == False):
+        print()
+        print("Success extract data , but the data is corrupt (altitude unrealistic)")
+        print("Please provide another data or use more satellites")
     # Create a LineString for the path
     linestring = kml.newlinestring(name="Path", description="GPS Path")
     linestring.coords = coordinates
